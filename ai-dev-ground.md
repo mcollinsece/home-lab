@@ -42,16 +42,16 @@ The old homelab was **one Fedora box running everything** (Traefik, Pi-hole, Oll
 | Runtime | rootless Podman 5.4.2 (overlay) | ✅ Matches the plan |
 | User | `debian` uid 1000, has `sudo` | ✅ |
 | CPU / RAM | 4 vCPU / 15 GB | ✅ Fine for orchestrating remote-API agents |
-| **Disk** | **8 GB total, ~5.7 GB free, no LVM** | ⛔ **Blocker — fix first** |
+| **Disk** | **108 GB total, ~101 GB free, no LVM** | ✅ **Resized — ample for AI images** |
 | GPU | virtual QEMU VGA (`1234:1111`), no passthrough | ⚠️ CPU-only; expected — inference is remote for now |
-| `linger` | **off** for `debian` | ⚠️ Must enable or rootless services die on logout |
+| `linger` | **on** for `debian` | ✅ Rootless services survive logout |
 | Network | single NIC `eth0` `192.168.0.51/24` | ✅ |
 
-### The two things that will bite you immediately
+### Prerequisites — both resolved ✅
 
-1. **8 GB disk is far too small.** AI images are heavy — a single LangGraph/Python image with its deps is often 1–3 GB, and pulling a couple of agent images plus their build cache will exhaust 5.7 GB of headroom almost instantly. **Grow the VM disk in Proxmox before building anything** (see §6 step 0). Target at least 64–128 GB; rootless Podman stores images under `~/.local/share/containers`, which lives on `/`.
+1. ~~**8 GB disk is far too small.**~~ **Resolved** — the VM disk has been grown to **108 GB** (~101 GB free, all on `/`). AI images are heavy (a single LangGraph/Python image with deps is often 1–3 GB), but there's now ample headroom for many images plus build cache. Rootless Podman stores images under `~/.local/share/containers`, which lives on `/`.
 
-2. **`linger` is disabled.** Rootless Podman services managed by your *user* systemd instance stop when you log out unless lingering is on. Enable it: `sudo loginctl enable-linger debian`.
+2. ~~**`linger` is disabled.**~~ **Resolved** — `loginctl enable-linger debian` has been run (`Linger=yes`), so rootless Podman services managed by your *user* systemd instance now survive logout.
 
 ---
 
@@ -181,18 +181,18 @@ For **one-shot / batch** workflows (a LangGraph job that runs and exits), skip t
 
 ## 6. Setup steps (in order)
 
-### Step 0 — Grow the disk (do this first, in Proxmox)
-On the Proxmox host (`192.168.0.50`): resize the VM disk (e.g. to 128 GB), then on this VM grow the partition + filesystem. There's no LVM, so it's a direct `growpart` + `resize2fs`:
+### Step 0 — Grow the disk ✅ done
+The VM disk has been resized to **108 GB** (~101 GB free on `/`), so this step is complete. For reference, the resize was a direct `growpart` + `resize2fs` (no LVM):
 ```bash
 sudo growpart /dev/sda 1
 sudo resize2fs /dev/sda1
 df -h /          # confirm the new size
 ```
-*(Snapshot the VM in Proxmox before resizing.)*
+*(Snapshot the VM in Proxmox before any future resize.)*
 
 ### Step 1 — Host prep (rootless Podman essentials)
 ```bash
-sudo loginctl enable-linger debian          # services survive logout
+sudo loginctl enable-linger debian          # ✅ done — services survive logout
 # confirm subuid/subgid ranges exist for rootless (Debian usually sets these):
 grep debian /etc/subuid /etc/subgid
 ```
@@ -243,8 +243,8 @@ The single-node discipline now (containers, registry, env/secret separation, one
 
 ## 8. Immediate next steps
 
-- [ ] **Snapshot + grow the VM disk** to ≥64 GB (Proxmox), then `growpart`/`resize2fs`. *(unblocks everything)*
-- [ ] `sudo loginctl enable-linger debian`.
+- [x] **Snapshot + grow the VM disk** — done, now 108 GB (~101 GB free). *(unblocked everything)*
+- [x] `sudo loginctl enable-linger debian` — done (`Linger=yes`).
 - [ ] Add `.gitignore` (§4) and a `projects/_template/` skeleton.
 - [ ] `bootstrap/setup-host.sh`: create `ai-net` + the local registry Quadlet.
 - [ ] Create the `anthropic_api_key` (and any Bedrock) Podman secret from an untracked `.env`.
