@@ -1,0 +1,30 @@
+# Traefik STATIC configuration.
+# Routing is DYNAMIC and comes entirely from container labels (Podman provider),
+# so adding a service never means editing this file.
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+
+log:
+  level: INFO
+
+accessLog: {}
+
+api:
+  dashboard: true          # exposed via the router defined on traefik.container's labels
+
+entryPoints:
+  web:
+    address: ":80"
+
+providers:
+  docker:
+    # Podman's rootless socket, bind-mounted to the docker-compatible path.
+    endpoint: "unix:///var/run/docker.sock"
+    exposedByDefault: false # opt-in: only containers with `traefik.enable=true` are routed
+    network: ai-net         # the network Traefik uses to reach discovered containers
+    watch: true
+    # Auto-derive the hostname from the container name: a container named `grafana`
+    # is reachable at grafana.lab.lan with NO Host(...) label. An explicit
+    # traefik.http.routers.*.rule label still overrides this when you need it.
+    defaultRule: "Host(`{{ normalize .Name }}.lab.lan`)"

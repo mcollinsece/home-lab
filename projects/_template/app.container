@@ -1,0 +1,45 @@
+# Quadlet template — the PREFERRED way to run a service here (systemd-native,
+# graduates cleanly to a k8s manifest later; see ai-dev-ground.md §3, §5).
+#
+# Copy this dir:   cp -r projects/_template projects/<name>
+# Rename file to:  <name>.container   and replace every <name> below.
+# Install:         ln -sf ~/home-lab/projects/<name>/<name>.container \
+#                        ~/.config/containers/systemd/<name>.container
+#                  systemctl --user daemon-reload && systemctl --user start <name>
+[Unit]
+Description=<name> — what it does
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+# REQUIRED: without this, Quadlet names the container `systemd-<name>` and Traefik's
+# defaultRule would route it to systemd-<name>.lab.lan instead of <name>.lab.lan.
+ContainerName=<name>
+
+# Pin a tag or digest — never :latest. Build locally → push to the registry, or
+# use an upstream image.
+Image=localhost:5000/<name>:0.1.0
+
+# Join the shared bridge so Traefik can reach it.
+Network=ai-net.network
+
+# Config & secrets (the real .env is gitignored; commit env.example only).
+EnvironmentFile=%h/home-lab/projects/<name>/<name>.env
+# Secret=anthropic_api_key,type=env,target=ANTHROPIC_API_KEY
+
+# --- Traefik integration -------------------------------------------------------
+# This single label is all most services need. The hostname is derived from the
+# container name automatically → http://<name>.lab.lan
+Label=traefik.enable=true
+# Uncomment ONLY if the app does not listen on :80 inside the container:
+# Label=traefik.http.services.<name>.loadbalancer.server.port=8080
+# Need a custom host/path instead of the name-derived default? Override the rule:
+# Label=traefik.http.routers.<name>.rule=Host(`custom.lab.lan`)
+# -------------------------------------------------------------------------------
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

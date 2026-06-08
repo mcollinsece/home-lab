@@ -1,0 +1,24 @@
+# Compose template — for quick experiments or importing upstream stacks.
+# Deploy:   podman compose up -d        (from inside projects/<name>/)
+# The Quadlet form (app.container) is preferred for anything long-lived, but this
+# works identically with Traefik.
+services:
+  myapp:
+    image: docker.io/library/nginx:1.27   # pin a tag — never :latest
+    container_name: myapp                  # → host becomes myapp.lab.lan (defaultRule)
+    networks: [ai-net]
+    # env_file: ./myapp.env                # real secrets, gitignored
+    restart: unless-stopped
+    labels:
+      # All most services need — hostname derived from container_name:
+      - traefik.enable=true
+      # Uncomment ONLY if the app's internal port isn't 80:
+      # - traefik.http.services.myapp.loadbalancer.server.port=8080
+      # Custom host instead of the name-derived default:
+      # - traefik.http.routers.myapp.rule=Host(`custom.lab.lan`)
+
+networks:
+  # Reuse the shared bridge Traefik watches (created by networks/ai-net.network).
+  # `external: true` means compose attaches to it rather than creating its own.
+  ai-net:
+    external: true
