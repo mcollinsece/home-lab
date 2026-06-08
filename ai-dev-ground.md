@@ -16,8 +16,8 @@ The old homelab was **one Fedora box running everything** (Traefik, Pi-hole, Oll
 | Node | Address | Type | Role |
 |---|---|---|---|
 | Proxmox host | `192.168.0.50` | bare metal | Hypervisor (Dell Optiplex) |
-| **`homelab`** (this box) | `192.168.0.51` | VM (Debian 13) | **AI dev ground** — the subject of this doc |
-| Traefik | `192.168.0.52` | LXC | Reverse proxy / load balancer |
+| **`homelab`** (this box) | `192.168.0.51` | VM (Debian 13) | **AI dev ground** + **Traefik** ingress (subject of this doc) |
+| ~~Traefik~~ | ~~`192.168.0.52`~~ | ~~LXC~~ | **Retired** — moved onto the `homelab` VM as a rootless Podman container (see §6) |
 | AdGuard | `192.168.0.53` | LXC | DNS / ad-block (replaces Pi-hole) |
 
 ### Mapping: old responsibility → new home
@@ -25,12 +25,12 @@ The old homelab was **one Fedora box running everything** (Traefik, Pi-hole, Oll
 | Old (on the Fedora monolith) | New | Implication for this VM |
 |---|---|---|
 | Pi-hole (DNS, macvlan `.53`) | **AdGuard LXC `192.168.0.53`** | ❌ No DNS container here. No macvlan needed. |
-| Traefik (reverse proxy + socket mount + custom SELinux policy) | **Traefik LXC `192.168.0.52`** | ❌ No Traefik here. None of the `traefik.cil`/`.te` SELinux pain carries over (and Debian uses AppArmor, not SELinux, anyway). |
+| Traefik (reverse proxy + socket mount + custom SELinux policy) | **Rootless Podman container *on this VM*** (`traefik/`) | ✅ Traefik runs here, discovering services by container **label** over the rootless Podman socket. None of the `traefik.cil`/`.te` SELinux pain carries over — Debian uses AppArmor, no relabeling needed. |
 | WireGuard VPN | (host/LXC decision — out of scope for this VM) | ❌ Not on the dev ground. |
 | Ollama / Open WebUI / Langflow / Bedrock GW | **Remote APIs now; vLLM cluster later** | Inference is *not* hosted here yet — agents call out to Anthropic/Bedrock/OpenAI. |
 | `podman-compose@.service` template + `start_podman_services.sh` | **Podman Quadlets** (systemd-native) | Clean, declarative, no third-party `podman-compose` binary to vanish on you. |
 
-**Net effect:** this VM sheds the proxy, DNS, and VPN concerns entirely. It has exactly one job — run containerized AI workflows — which keeps it simple and disposable.
+**Net effect:** this VM sheds the DNS and VPN concerns entirely. It *does* now run **Traefik** (the `.52` LXC was retired), but Traefik's static config lives in this repo and all routing is label-based — so the VM stays reproducible/disposable: re-create it, `git pull`, start the units, done. DNS deliberately stays isolated in the AdGuard LXC so it survives any experimentation here.
 
 ---
 
@@ -60,19 +60,24 @@ The old homelab was **one Fedora box running everything** (Traefik, Pi-hole, Oll
 The design rule: **everything you do now should translate to a Kubernetes manifest with minimal rework.** Concretely, that means containers (not host installs), per-project images pushed to a local registry, config via env/secrets, and one-command bring-up/teardown.
 
 ```
-                         ┌──────────────────────────────────────────┐
-   Traefik LXC (.52) ───▶│  homelab VM (.51) — rootless Podman       │
-   (only for anything    │                                          │
-    you choose to expose)│   ┌────────────┐  ┌────────────┐         │
-                         │   │ hermes     │  │ openclaw   │  …       │   ──▶  Anthropic /
-   AdGuard LXC (.53)     │   │ (Quadlet)  │  │ (Quadlet)  │         │        Bedrock /
-   resolves *.lan etc.   │   └────────────┘  └────────────┘         │        OpenAI APIs
-                         │   ┌────────────┐  ┌────────────┐         │
-                         │   │ langgraph  │  │ local       │        │
-                         │   │ project A  │  │ registry    │        │
-                         │   └────────────┘  │ :5000       │        │
-                         │   ai-net (internal bridge)       │        │
-                         └──────────────────────────────────────────┘
+   LAN (*.lab.lan) ─────────┐
+                            ▼
+                  ┌──────────────────────────────────────────┐
+                  │  homelab VM (.51) — rootless Podman       │
+                  │   ┌──────────┐  :80                       │
+                  │   │ Traefik  │  discovers via podman.sock  │
+                  │   └────┬─────┘  routes by Host() on ai-net │
+   AdGuard LXC (.53)       │                                   │
+   *.lab.lan → .51   │   ┌─▼──────────┐  ┌────────────┐        │   ──▶  Anthropic /
+                     │   │ hermes     │  │ openclaw   │  …      │        Bedrock /
+                     │   │ (Quadlet)  │  │ (Quadlet)  │         │        OpenAI APIs
+                     │   └────────────┘  └────────────┘         │
+                     │   ┌────────────┐  ┌────────────┐         │
+                     │   │ langgraph  │  │ local       │        │
+                     │   │ project A  │  │ registry    │        │
+                     │   └────────────┘  │ :5000       │        │
+                     │   ai-net (internal bridge)       │        │
+                     └──────────────────────────────────────────┘
 ```
 
 ### Now → Future mapping
@@ -86,7 +91,7 @@ The design rule: **everything you do now should translate to a Kubernetes manife
 | **Secrets** | untracked `.env` → **Podman secrets** | **k8s Secrets** (same shape) |
 | Inference | **remote APIs** | **vLLM cluster** (GPU nodes) + remote APIs as fallback |
 | Networking | `ai-net` internal bridge | CNI (Flannel/Cilium) + Services |
-| Exposure | publish a port → Traefik LXC routes it | Ingress (Traefik/nginx) |
+| Exposure | add `traefik.*` labels → Traefik (on this VM) routes it | Ingress (Traefik/nginx) |
 
 Picking Podman Quadlets now (over raw compose) is deliberate: a Quadlet *is* a systemd unit and its key/value shape (`Image=`, `Environment=`, `Secret=`, `Network=`) reads almost one-to-one against a Pod spec, so the eventual port to manifests is mechanical.
 
@@ -104,12 +109,22 @@ home-lab/
 ├── .gitignore                 # **/*.env, !*.env.example, *.key, age keys
 ├── bootstrap/
 │   └── setup-host.sh          # idempotent: linger, ai-net, registry, dirs
+├── networks/
+│   └── ai-net.network         # Quadlet: shared internal bridge (Traefik + apps)
+├── traefik/
+│   ├── traefik.yml            # Traefik STATIC config (label-based routing)
+│   ├── traefik.container      # Quadlet for the reverse proxy
+│   └── README.md              # how to expose a service + teardown
+├── portainer/
+│   ├── portainer.container    # Quadlet: container-management UI (portainer.lab.lan)
+│   └── portainer-data.volume  # Quadlet: persistent Portainer state
 ├── registry/
 │   └── registry.container     # Quadlet for the local image registry
 ├── projects/
-│   ├── _template/             # copy this to start a new agent project
-│   │   ├── Containerfile
-│   │   ├── <name>.container   # Quadlet unit (systemd --user)
+│   ├── _template/             # copy this to start a new service (Traefik-ready)
+│   │   ├── app.container      # Quadlet unit (preferred)
+│   │   ├── compose.yaml       # compose alternative
+│   │   ├── Containerfile      # optional, if building your own image
 │   │   ├── env.example        # documented, committed
 │   │   └── README.md
 │   ├── hermes/
@@ -222,8 +237,22 @@ These map 1:1 to `kubectl create secret` later. **Never commit the real `.env`.*
 ### Step 5 — First project
 Copy `projects/_template/` → `projects/hermes/`, fill in the `Containerfile` and `env`, build/push, drop the Quadlet, enable it. Repeat for OpenClaw and each LangGraph app.
 
-### Step 6 — Exposure (only if needed)
-If a workflow needs a UI/endpoint reachable on the LAN, publish a port on the container and add a route on the **Traefik LXC (`.52`)** pointing at `192.168.0.51:<port>`; add the DNS name in **AdGuard (`.53`)**. Most agent jobs need no inbound exposure at all.
+### Step 6 — Exposure (only if needed) — Traefik runs here now ✅
+Traefik runs as a rootless Podman container on this VM (`traefik/`), discovering services by **label** over the rootless Podman socket (`%t/podman/podman.sock`). To expose a service: put it on `ai-net` and add labels — no Traefik file edits, no SSH, no sync:
+
+```ini
+ContainerName=<name>          # REQUIRED in Quadlets — else the name is `systemd-<unit>`
+Network=ai-net.network        #   and the host becomes systemd-<name>.lab.lan
+Label=traefik.enable=true
+# Label=traefik.http.services.<name>.loadbalancer.server.port=<port>  # only if not 80
+```
+
+The hostname is derived from the container name automatically (provider
+`defaultRule = Host(`{{ normalize .Name }}.lab.lan`)`), so naming a container
+`grafana` makes it `grafana.lab.lan` with no `Host(...)` label. An explicit
+`traefik.http.routers.*.rule` label still overrides this when you need a custom host.
+
+Then add one wildcard DNS rewrite in **AdGuard (`.53`)**: `*.lab.lan → 192.168.0.51`, and every service is reachable at `http://<name>.lab.lan`. HTTP only for now (no TLS). Prereqs that made this work: `net.ipv4.ip_unprivileged_port_start=80` (so rootless can bind :80) and the enabled `podman.socket` user unit. Most agent jobs need no inbound exposure at all.
 
 ---
 
@@ -245,8 +274,11 @@ The single-node discipline now (containers, registry, env/secret separation, one
 
 - [x] **Snapshot + grow the VM disk** — done, now 108 GB (~101 GB free). *(unblocked everything)*
 - [x] `sudo loginctl enable-linger debian` — done (`Linger=yes`).
-- [ ] Add `.gitignore` (§4) and a `projects/_template/` skeleton.
-- [ ] `bootstrap/setup-host.sh`: create `ai-net` + the local registry Quadlet.
+- [x] Add `.gitignore` (§4) and a `projects/_template/` skeleton (Quadlet + compose, Traefik-ready).
+- [x] **`ai-net` bridge + Traefik** stood up on this VM (rootless Quadlets in `networks/`, `traefik/`); label discovery, dashboard, and default-deny all verified.
+- [x] **Portainer** UI (`portainer/`) on `ai-net`, routed at `portainer.lab.lan`, persistent volume — verified.
+- [ ] **AdGuard:** add the `*.lab.lan → 192.168.0.51` wildcard rewrite so hostnames resolve from other LAN clients.
+- [ ] `bootstrap/setup-host.sh`: fold in the `ai-net` + Traefik + local registry setup so a rebuild is one command.
 - [ ] Create the `anthropic_api_key` (and any Bedrock) Podman secret from an untracked `.env`.
 - [ ] Stand up **Hermes** as the first project end-to-end; prove build → push → Quadlet → run → clean teardown.
 - [ ] Then OpenClaw and the first LangGraph project on the same pattern.

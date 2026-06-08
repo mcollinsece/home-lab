@@ -1,0 +1,9 @@
+# Secrets / env material never enter git (ai-dev-ground.md §4)
+**/*.env
+!**/*.env.example
+!**/env.example
+*.key
+*.age
+
+# editor swap files
+*.swp
