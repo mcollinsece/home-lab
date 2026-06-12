@@ -1,10 +1,17 @@
-# Claude Code sandbox policy — Max/Pro subscription (OAuth) auth.
+# Claude Code sandbox policy — dual auth: Max/Pro subscription (OAuth, default)
+# + Amazon Bedrock (per-project, opt-in via CLAUDE_CODE_USE_BEDROCK).
 #
-# Phase 2 of docs/future/ai-dev-ground.md. Deny-by-default egress; this opens
+# Phases 2–3 of docs/future/ai-dev-ground.md. Deny-by-default egress; this opens
 # only the hosts Claude Code needs. Pure L4 (host:port + binary identity), no L7
 # method inspection — streaming inference and the OAuth login flow break under a
 # read-only L7 preset, and "just let everything through" for the claude binary
 # is the documented pattern (OpenShell generate-sandbox-policy example M1).
+#
+# L4 (no L7 rewrite) is also what keeps Bedrock working: Claude Code's AWS SDK
+# signs each request with SigV4, and OpenShell has no AWS provider and cannot
+# re-sign — so it must pass the bytes through untouched. AWS creds therefore live
+# inside the sandbox as env vars (user settings `env` block), same as the
+# subscription token lives there from `claude login`. See docs Phase 3.
 #
 # Apply at create:   openshell sandbox create --policy openshell/policies/claude-code.yaml -- claude
 # Hot-reload:        openshell policy set <name> --policy openshell/policies/claude-code.yaml --wait
@@ -38,6 +45,25 @@ network_policies:
       # Feature flags / telemetry Claude Code pings on startup
       - { host: statsig.anthropic.com, port: 443 }
       - { host: sentry.io, port: 443 }
+    binaries:
+      - { path: /usr/local/bin/claude }
+      - { path: /usr/bin/claude }
+
+  # Amazon Bedrock (opt-in per project). The `us.` cross-region inference
+  # profiles fan out across us-east-1 / us-east-2 / us-west-2 regardless of the
+  # primary AWS_REGION, so allow bedrock-runtime in all three. `bedrock.<region>`
+  # (control plane) is hit once at startup for ListInferenceProfiles /
+  # GetInferenceProfile. No sts.* host: static IAM-user keys self-sign — only
+  # role-assumption / SSO auth would need sts.<region>.amazonaws.com added here.
+  bedrock:
+    name: aws-bedrock
+    endpoints:
+      # Inference (InvokeModel / InvokeModelWithResponseStream) — cross-region set
+      - { host: bedrock-runtime.us-east-1.amazonaws.com, port: 443 }
+      - { host: bedrock-runtime.us-east-2.amazonaws.com, port: 443 }
+      - { host: bedrock-runtime.us-west-2.amazonaws.com, port: 443 }
+      # Control plane — inference-profile discovery at startup
+      - { host: bedrock.us-east-1.amazonaws.com, port: 443 }
     binaries:
       - { path: /usr/local/bin/claude }
       - { path: /usr/bin/claude }

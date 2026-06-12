@@ -65,13 +65,39 @@ Manual, sensitive, or interactive steps the bootstrap can't do. See
       > If steps 5's quadlet-start / sandbox-create should be automated, say so and I'll
       > fold `systemctl --user start traefik portainer` (and optionally the sandbox
       > create) into `setup-host.sh` to make the rebuild closer to one-shot.
-- [ ] **Podman secrets are not in git by design** — document/script how to re-create
-      them on a new host (`anthropic_api_key`, AWS Bedrock creds) from my password manager.
+- [ ] **Secrets are not in git by design** — document/script how to re-create them on
+      a new host from my password manager. Two distinct stores: (a) Podman secrets for
+      quadlet services (`anthropic_api_key` etc. — none yet); (b) **sandbox-resident**
+      creds for agents — subscription via `claude login`, AWS Bedrock keys via the
+      sandbox `~/.claude/settings.json` `env` block (see Phase 3). A snapshot revert
+      wipes both → re-add manually.
 
-## Phase 3 — Bedrock dual auth (needs my AWS creds)
-- [ ] Create a scoped IAM user (`bedrock:InvokeModel*` only); store keys in my vault.
-- [ ] `openshell provider create` for AWS; add `bedrock-runtime.<region>` + `sts.<region>`
-      to a Bedrock project policy. Verify the current Bedrock model ID.
+## Phase 3 — Bedrock dual auth (IN PROGRESS — decided us-east-1 + Sonnet 4.6)
+Design: subscription (OAuth) stays the **default**; Bedrock is **opt-in per
+project**. Correction baked in 2026-06-12: OpenShell v0.0.62 has **no AWS provider
+type** and can't SigV4-sign, so the original `openshell provider create` plan is
+dead — AWS keys live **inside the sandbox as env vars** (Claude Code's AWS SDK
+signs). Egress policy already handles Bedrock.
+
+- [x] **Network policy → Bedrock egress** — `openshell/policies/claude-code.yaml`
+      v2 hot-reloaded onto the live `claude-code` sandbox (bedrock-runtime
+      us-east-1/2 + us-west-2, bedrock.us-east-1). No `sts.*` for static keys.
+- [ ] **Create a scoped IAM user** — `bedrock:InvokeModel`,
+      `InvokeModelWithResponseStream`, `ListInferenceProfiles`, `GetInferenceProfile`
+      on `inference-profile/*` + `foundation-model/*`, plus the marketplace
+      subscribe condition (see Claude Code Bedrock IAM block). Store keys in my vault.
+      First-time only: submit the Bedrock model-access use-case form in the console.
+- [ ] **Put AWS keys in the sandbox** (no rebuild) — add to the sandbox user
+      `~/.claude/settings.json` `env` block (`AWS_ACCESS_KEY_ID`,
+      `AWS_SECRET_ACCESS_KEY`, `AWS_REGION=us-east-1`) via `openshell sandbox exec
+      claude-code`. Keys stay out of git. (On a future rebuild, prefer
+      `openshell sandbox create … --env AWS_ACCESS_KEY_ID=… …` instead.)
+- [ ] **Bedrock project settings** — in a test project inside the sandbox, write
+      `.claude/settings.json` with `{"env":{"CLAUDE_CODE_USE_BEDROCK":"1",
+      "AWS_REGION":"us-east-1","ANTHROPIC_MODEL":"us.anthropic.claude-sonnet-4-6"}}`.
+- [ ] **Verify** — `cd` into the Bedrock project, run `claude`, confirm `/status`
+      shows `Amazon Bedrock`, run a prompt; `cd` to any other dir → back to
+      subscription. (Egress already proven for both paths via policy v2.)
 
 ## Later phases (no blockers, just sequencing)
 - [ ] Phase 4 — Codex sandbox (`OPENAI_API_KEY`) + Gemini CLI BYOC sandbox.

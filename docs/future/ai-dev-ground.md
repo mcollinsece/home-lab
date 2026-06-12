@@ -155,29 +155,58 @@ migration (see [todos.md](../current/todos.md)).
 
 Claude Code picks its backend per project via settings precedence (project `.claude/settings.json` overrides user `~/.claude/settings.json`). Subscription OAuth is the default; Bedrock is opt-in via env.
 
-**Inside the sandbox**, per project:
+**Inside the sandbox** (creds live in the sandbox, not on the host — same model
+as `claude login`):
 
 ```jsonc
-// ~/.claude/settings.json — default = subscription (run `claude login` once)
-{ }
+// ~/.claude/settings.json (sandbox user level) — AWS creds present but INERT:
+// Claude Code ignores them unless a project sets CLAUDE_CODE_USE_BEDROCK.
+// Subscription (OAuth from `claude login`) stays the default everywhere.
+{
+  "env": {
+    "AWS_ACCESS_KEY_ID": "AKIA…",
+    "AWS_SECRET_ACCESS_KEY": "…",
+    "AWS_REGION": "us-east-1"
+  }
+}
 
-// <bedrock-project>/.claude/settings.json
+// <bedrock-project>/.claude/settings.json — opt THIS project into Bedrock.
+// Project settings override user settings, so only here is Bedrock active.
 {
   "env": {
     "CLAUDE_CODE_USE_BEDROCK": "1",
     "AWS_REGION": "us-east-1",
-    "ANTHROPIC_MODEL": "us.anthropic.claude-sonnet-4-6"   // verify current Bedrock model ID
+    "ANTHROPIC_MODEL": "us.anthropic.claude-sonnet-4-6"   // verified 2026-06-12
   }
 }
 ```
 
-**Host-side wiring (OpenShell):**
+**How the creds actually get in (validated 2026-06-12 — the plan's original
+`openshell provider create` for AWS does NOT work):**
 
-1. Anthropic provider — auto-discovered from `ANTHROPIC_API_KEY`, or run `claude login` (OAuth) inside the sandbox once for subscription auth.
-2. AWS provider — `openshell provider create` with `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (scoped IAM user, `bedrock:InvokeModel*` only).
-3. Network policy must allow both paths:
-   - Subscription: `api.anthropic.com`, `console.anthropic.com`, `claude.ai`
-   - Bedrock: `bedrock-runtime.<region>.amazonaws.com`, `sts.<region>.amazonaws.com`
+OpenShell v0.0.62 has **no AWS/Bedrock provider type** (`provider list-profiles`
+has only claude-code/codex/cursor/vertex/nvidia/…), and its egress proxy can't
+SigV4-sign. So there's nothing to "auto-discover" AWS creds the way an
+`ANTHROPIC_API_KEY` provider would. Instead Claude Code's bundled AWS SDK signs
+each request itself, which means **the AWS keys must be present inside the
+sandbox as env vars**. Two ways to put them there:
+
+1. **Existing sandbox (no rebuild):** add them to the sandbox user
+   `~/.claude/settings.json` `env` block (shown above) via `openshell sandbox
+   exec` — preserves the Phase 2 subscription login.
+2. **On rebuild (reproducible):** `openshell sandbox create … --env
+   AWS_ACCESS_KEY_ID=… --env AWS_SECRET_ACCESS_KEY=… --env AWS_REGION=us-east-1`.
+
+Either way the keys never hit git (a scoped IAM user, `bedrock:InvokeModel*` +
+inference-profile read; see [todos.md](../current/todos.md)).
+
+**Network policy** ([`openshell/policies/claude-code.yaml`](../../openshell/policies/claude-code.yaml),
+hot-reloaded onto the live sandbox, **done 2026-06-12 — policy v2**) allows both:
+   - Subscription: `api.anthropic.com`, `platform.claude.com`, `claude.ai`, …
+   - Bedrock: `bedrock-runtime.{us-east-1,us-east-2,us-west-2}.amazonaws.com`
+     (the `us.` cross-region profile fans out across all three) +
+     `bedrock.us-east-1.amazonaws.com` (startup inference-profile discovery). No
+     `sts.*` — static IAM-user keys self-sign; only role/SSO auth would need it.
 
 Switching = `cd` into a project; no re-auth, no sandbox rebuild.
 
@@ -353,7 +382,9 @@ When you add a second/third Optiplex:
 
 1. [x] Phase 1: Node 22 (Podman already present; Docker optional, NemoClaw-only) — `node v22.22.3`
 2. [x] Phase 2: OpenShell + Claude Code sandbox — v0.0.62 on **rootless Podman** (Podman-first premise validated, no Docker); `claude-code` sandbox Ready, `claude login` done, AdGuard `*.lab.lan` wildcard live. **Complete.**
-3. [ ] Phase 3: Subscription + Bedrock providers, per-project switching ← **next**
+3. [~] Phase 3: Subscription ↔ Bedrock per-project switching ← **in progress** —
+   policy v2 (Bedrock egress) live; region us-east-1, default `us.anthropic.claude-sonnet-4-6`;
+   remaining: add AWS creds in-sandbox + first Bedrock invocation (see todos.md)
 4. [ ] Phase 4: Codex sandbox; Gemini CLI BYOC sandbox
 5. [ ] Phase 5: Always-on OpenClaw assistant (direct BYOC on Podman) — **completes the Podman baseline**
 6. [ ] Phase 6: NemoClaw experiment (deferred; the one Docker service) — explore after baseline

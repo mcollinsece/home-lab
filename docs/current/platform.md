@@ -61,7 +61,7 @@
 | Traefik | Podman Quadlet | label-discovery via `podman.sock`, port `:80` | ✅ |
 | Portainer | Podman Quadlet | `portainer.lab.lan` | ✅ |
 | OpenShell gateway | systemd `--user` service | `0.0.0.0:17670` (mTLS), Podman driver, `openshell` bridge | ✅ |
-| `claude-code` sandbox | OpenShell sandbox (Podman) | outbound-only; policy `openshell/policies/claude-code.yaml` | ✅ `claude login` done; live prompt verified through the egress policy |
+| `claude-code` sandbox | OpenShell sandbox (Podman) | outbound-only; dual-auth policy v2 `openshell/policies/claude-code.yaml` (Anthropic + Bedrock egress) | ✅ subscription (`claude login`) live; Bedrock egress allowed, creds/invocation pending (Phase 3) |
 
 > **OpenShell config note:** the gateway must bind `0.0.0.0:17670` (not the Debian `.deb` default of `127.0.0.1`) so sandbox containers can reach it over the host bridge. Driver + bind live in [`openshell/gateway.env`](../../openshell/gateway.env) (`OPENSHELL_DRIVERS=podman`, `OPENSHELL_BIND_ADDRESS=0.0.0.0`), git-managed and symlinked to `~/.config/openshell/gateway.env` by the bootstrap script. mTLS gates the wider bind. `openshell doctor check` falsely errors on Docker even when Podman is active — cosmetic.
 
