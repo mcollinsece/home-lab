@@ -29,7 +29,10 @@ network_policies:
     endpoints:
       # Inference + OAuth token exchange
       - { host: api.anthropic.com, port: 443 }
-      # Subscription OAuth authorize (claude login)
+      # Subscription login / OAuth (claude login). Claude Code 2.x routes login
+      # through platform.claude.com; claude.ai + console.anthropic.com remain for
+      # the authorize/redirect legs.
+      - { host: platform.claude.com, port: 443 }
       - { host: claude.ai, port: 443 }
       - { host: console.anthropic.com, port: 443 }
       # Feature flags / telemetry Claude Code pings on startup

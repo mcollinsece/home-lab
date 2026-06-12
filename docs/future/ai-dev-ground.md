@@ -141,7 +141,8 @@ in [platform.md](../current/platform.md); OpenShell specifics in
   OpenShell repo is cloned at `/home/debian/OpenShell` for its agent skills
   (`.agents/skills/`, incl. `generate-sandbox-policy`).
 
-Remaining: `claude login` (interactive OAuth — see [todos.md](../current/todos.md)).
+`claude login` (Max/Pro OAuth) is done and the AdGuard `*.lab.lan` wildcard is
+live — **Phase 2 complete.**
 
 ## Phase 3 — Dual auth: Max/Pro subscription ↔ Bedrock per project  ← START HERE
 
@@ -337,14 +338,14 @@ When you add a second/third Optiplex:
 **Pre-work (see [todos.md](../current/todos.md) for detail):**
 
 - [x] `bootstrap/setup-host.sh` — idempotent host rebuild
-- [ ] AdGuard wildcard `*.lab.lan → 192.168.0.51` (on AdGuard LXC `.53`)
+- [x] AdGuard wildcard `*.lab.lan → 192.168.0.51` (on AdGuard LXC `.53`)
 - [ ] Podman secrets: `anthropic_api_key`, AWS Bedrock creds
 - [ ] Local image registry `:5000`
 
 **Phases:**
 
 1. [x] Phase 1: Node 22 (Podman already present; Docker optional, NemoClaw-only) — `node v22.22.3`
-2. [x] Phase 2: OpenShell + Claude Code sandbox — v0.0.62 on **rootless Podman** (Podman-first premise validated, no Docker); `claude-code` sandbox Ready. Pending only `claude login`.
+2. [x] Phase 2: OpenShell + Claude Code sandbox — v0.0.62 on **rootless Podman** (Podman-first premise validated, no Docker); `claude-code` sandbox Ready, `claude login` done, AdGuard `*.lab.lan` wildcard live. **Complete.**
 3. [ ] Phase 3: Subscription + Bedrock providers, per-project switching ← **next**
 4. [ ] Phase 4: Codex sandbox; Gemini CLI BYOC sandbox
 5. [ ] Phase 5: Always-on OpenClaw assistant (direct BYOC on Podman) — **completes the Podman baseline**

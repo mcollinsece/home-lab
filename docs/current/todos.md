@@ -4,18 +4,14 @@ Manual, sensitive, or interactive steps the bootstrap can't do. See
 [platform.md](platform.md) for current state and
 [../future/ai-dev-ground.md](../future/ai-dev-ground.md) for the phase plan.
 
-## Now (finish Phase 2)
-- [ ] **Authenticate Claude Code** (interactive OAuth — only I can do this):
-      ```bash
-      openshell sandbox connect claude-code
-      #   inside the sandbox:
-      claude login     # browser OAuth with my Max/Pro account
-      claude           # start coding
-      ```
-- [ ] **AdGuard `*.lab.lan` wildcard** — on the AdGuard LXC (`192.168.0.53`), add
-      DNS rewrite `*.lab.lan → 192.168.0.51`. Linchpin for `*.lab.lan` resolving
-      from LAN clients (Portainer, Traefik dashboard, future sandboxes). Lives off
-      this VM, so it's not in `setup-host.sh`.
+## Phase 2 — COMPLETE ✅
+- [x] **Claude Code authenticated** — `claude login` (Max/Pro OAuth) succeeded.
+- [x] **AdGuard DNS rewrites** — `*.lab.lan → .51`, `adguard.lan → .53`,
+      `debian.lan → .51`. Verified `portainer.lab.lan → .51 → Traefik 200`.
+
+  > Optional: the VM resolves via the router (`.1`), not AdGuard, so `*.lab.lan`
+  > doesn't resolve *from the VM*. Point its resolver at `192.168.0.53` only if you
+  > want local name resolution on the VM — not required.
 
 ## Reproducibility / migration prep (server is not its forever home)
 - [ ] **Push this repo to GitHub** and confirm a clean clone + `bootstrap/setup-host.sh`

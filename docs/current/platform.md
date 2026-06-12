@@ -31,7 +31,9 @@
 - DHCP server for the entire network
 - Authoritative DNS for the entire network (replaces Pi-hole from old setup)
 - Ad/tracker blocking
-- DNS wildcard: `*.lab.lan → 192.168.0.51` — **not yet configured; must be added before lab hostnames resolve from LAN clients**
+- DNS rewrites (configured ✅): `*.lab.lan → 192.168.0.51`, `adguard.lan → 192.168.0.53`, `debian.lan → 192.168.0.51`. LAN clients that use AdGuard for DNS (via DHCP) resolve lab hostnames; verified `portainer.lab.lan → 192.168.0.51 → Traefik HTTP 200`.
+
+> **Note:** the homelab VM itself resolves via the router (`192.168.0.1`) + Tailscale, **not** AdGuard, so `*.lab.lan` does not resolve *from the VM*. Harmless (Traefik routes by Host header; sandboxes are outbound-only). Point the VM's resolver at `192.168.0.53` only if you want it to reach services by name locally.
 
 ---
 
@@ -83,10 +85,8 @@ or interactive — those are tracked in [todos.md](todos.md).
 Outstanding work (manual/sensitive/interactive items + next phases) lives in
 **[todos.md](todos.md)**. Headlines:
 
-- [ ] **AdGuard wildcard** `*.lab.lan → 192.168.0.51` (on the AdGuard LXC `.53`)
-- [ ] **`claude login`** to finish Phase 2 (interactive OAuth)
 - [ ] Phase 3 Bedrock dual-auth; local registry `:5000`; Podman secrets
-- [x] ~~Node 22~~ · ~~OpenShell + first sandbox~~ · ~~`setup-host.sh`~~ — done
+- [x] ~~Node 22~~ · ~~OpenShell + first sandbox~~ · ~~`setup-host.sh`~~ · ~~AdGuard `*.lab.lan` wildcard~~ · ~~`claude login`~~ — **Phase 2 complete**
 
 > **Docker Engine:** confirmed **not** needed for the agent baseline — OpenShell
 > runs natively on rootless Podman. Install only for the deferred Phase 6
