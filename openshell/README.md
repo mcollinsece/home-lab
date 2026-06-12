@@ -2,14 +2,14 @@
 
 [OpenShell](https://github.com/NVIDIA/OpenShell) runs sandboxed coding agents
 (Claude Code, Codex, etc.) as isolated containers on the homelab VM's existing
-**rootless Podman** — no Docker. Phase 2 of
+**rootless Podman** — no Docker. Phases 2–3 of
 [../docs/future/ai-dev-ground.md](../docs/future/ai-dev-ground.md).
 
 ## Files
 | File | Role |
 |---|---|
 | `gateway.env` | gateway env overrides; symlinked to `~/.config/openshell/gateway.env` |
-| `policies/claude-code.yaml` | network policy for the Claude Code sandbox (subscription/OAuth) |
+| `policies/claude-code.yaml` | network policy for the Claude Code sandbox — **dual-auth** (Anthropic subscription + Amazon Bedrock egress); pure-L4 so SigV4 passes |
 
 The OpenShell binary, its `openshell-gateway` systemd `--user` service, and the
 mTLS certs under `~/.local/state/openshell/` are installed by
@@ -34,11 +34,20 @@ and `OPENSHELL_BIND_ADDRESS=0.0.0.0`. mTLS still gates the wider bind.
 ## (Re)create the Claude Code sandbox
 ```bash
 openshell sandbox create --name claude-code --no-auto-providers \
-    --policy ~/home-lab/openshell/policies/claude-code.yaml -- claude
+    --policy ~/home-lab/openshell/policies/claude-code.yaml \
+    --env AWS_ACCESS_KEY_ID=… --env AWS_SECRET_ACCESS_KEY=… --env AWS_REGION=us-east-1 \
+    -- claude
 # first run only — authenticate the Max/Pro subscription:
 openshell sandbox connect claude-code
 #   inside: claude login   (browser OAuth)  then  claude
 ```
+
+A new sandbox starts **blank** — no provider auto-injects creds. The `--env` flags
+above carry the Bedrock keys (inert until a project sets `CLAUDE_CODE_USE_BEDROCK`);
+`claude login` adds the subscription. Per-project subscription↔Bedrock switching and
+the full lifecycle/reproducibility notes are in
+[../docs/future/ai-dev-ground.md](../docs/future/ai-dev-ground.md) (Phase 3 +
+"Sandbox lifecycle") and [../docs/current/platform.md](../docs/current/platform.md).
 
 ## Everyday commands
 ```bash

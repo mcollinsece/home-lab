@@ -65,13 +65,46 @@ Manual, sensitive, or interactive steps the bootstrap can't do. See
       > If steps 5's quadlet-start / sandbox-create should be automated, say so and I'll
       > fold `systemctl --user start traefik portainer` (and optionally the sandbox
       > create) into `setup-host.sh` to make the rebuild closer to one-shot.
-- [ ] **Podman secrets are not in git by design** — document/script how to re-create
-      them on a new host (`anthropic_api_key`, AWS Bedrock creds) from my password manager.
+- [ ] **Secrets are not in git by design** — document/script how to re-create them on
+      a new host from my password manager. Two distinct stores: (a) Podman secrets for
+      quadlet services (`anthropic_api_key` etc. — none yet); (b) **sandbox-resident**
+      creds for agents — subscription via `claude login`, AWS Bedrock keys via the
+      sandbox `~/.claude/settings.json` `env` block (see Phase 3). A snapshot revert
+      wipes both → re-add manually.
+- [ ] **`bootstrap/new-claude-sandbox.sh <name>` — reproducible auth-ready spawn.**
+      New sandboxes start blank (no provider auto-injects creds; see platform.md
+      "Agent sandbox lifecycle"). Script should: source AWS keys from a gitignored
+      `~/home-lab/.secrets/bedrock.env` (never argv/git) → `openshell sandbox create
+      … --policy … --env AWS_*` → `--upload` the non-secret Bedrock project
+      `settings.json` → print the one manual step left (`claude login`, OAuth can't
+      be scripted) or offer to clone `.credentials.json` from the live sandbox.
+      Open question for me: re-login per sandbox (isolation) vs clone one token (no
+      re-login, shared subscription session).
 
-## Phase 3 — Bedrock dual auth (needs my AWS creds)
-- [ ] Create a scoped IAM user (`bedrock:InvokeModel*` only); store keys in my vault.
-- [ ] `openshell provider create` for AWS; add `bedrock-runtime.<region>` + `sts.<region>`
-      to a Bedrock project policy. Verify the current Bedrock model ID.
+## Phase 3 — Bedrock dual auth — COMPLETE ✅ (2026-06-12, us-east-1 + Sonnet 4.6)
+Design: subscription (OAuth) stays the **default**; Bedrock is **opt-in per
+project**. Correction baked in 2026-06-12: OpenShell v0.0.62 has **no AWS provider
+type** and can't SigV4-sign, so the original `openshell provider create` plan was
+dead — AWS keys live **inside the sandbox as env vars** (Claude Code's AWS SDK
+signs); egress handled by the policy.
+
+- [x] **Network policy → Bedrock egress** — `openshell/policies/claude-code.yaml`
+      v2 hot-reloaded onto the live `claude-code` sandbox (bedrock-runtime
+      us-east-1/2 + us-west-2, bedrock.us-east-1). No `sts.*` for static keys.
+- [x] **Scoped IAM user** created (`bedrock:InvokeModel*` + inference-profile read
+      + marketplace subscribe condition); Sonnet 4.6 model access granted in us-east-1.
+- [x] **AWS keys in the sandbox** — merged into the sandbox user
+      `~/.claude/settings.json` `env` block (inert until a project opts in);
+      subscription `.credentials.json` untouched. (On rebuild: `sandbox create … --env`.)
+- [x] **Bedrock project settings** — `/sandbox/bedrock-test/.claude/settings.json`
+      sets `CLAUDE_CODE_USE_BEDROCK=1` + `us.anthropic.claude-sonnet-4-6`.
+- [x] **Verified both paths** — `claude -p` from `/sandbox/bedrock-test` → Bedrock
+      Sonnet 4.6 (`bedrock-ok`); from `/sandbox` → subscription (`subscription-ok`).
+      `cd`-based switch works, no re-auth.
+
+> ⚠️ **Rotate the current IAM access key** — it was pasted in a Claude chat to do
+> the setup, so it lives in that transcript + host shell history. Generate a fresh
+> key in IAM, re-run the in-sandbox merge with the new one, delete the old key.
 
 ## Later phases (no blockers, just sequencing)
 - [ ] Phase 4 — Codex sandbox (`OPENAI_API_KEY`) + Gemini CLI BYOC sandbox.
