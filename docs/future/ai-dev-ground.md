@@ -4,6 +4,8 @@
 
 > **Current platform state:** [../current/platform.md](../current/platform.md) — hardware, IPs, running services, pending items
 
+> **Environment & intent:** This runs on a Proxmox VM on a single Dell OptiPlex — a **transitional development host**, not the final home. The plan is to migrate to a larger box (and eventually a compute cluster) once the stack is proven, which is why portability is a first-class design goal throughout — Quadlets that map to k8s, a local registry, remote inference (see [Now → Future mapping](#now--future-mapping) and [Path to k3s + vLLM](#path-to-k3s--vllm)). Because it's a dev host, it is **not a security-sensitive environment**: security still matters, but runtime/posture choices favour getting the stack working over hardening — e.g. rootless vs rootful Podman, or Docker, is a pragmatic call (see [Runtime](#runtime-podman-vs-docker)).
+
 ---
 
 ## How the stack fits together
@@ -26,7 +28,7 @@ Key facts:
 
 ## VM sizing requirements
 
-The current VM (4 vCPU / 15 GB / 108 GB) meets the minimum. Multi-agent use is better served by the recommended column.
+The current VM (4 vCPU / 15 GB / 108 GB) meets the minimum. The **recommended** column describes the migration-target box, not this OptiPlex — the Proxmox host has only 16 GB total, so this VM is already near the hardware ceiling. Treat the baseline as a **"few agents on-demand"** host (spin sandboxes up per task, tear them down after) rather than many always-on agents; full multi-agent concurrency is a goal for the larger box.
 
 | Resource | Minimum | Recommended for multi-agent |
 |---|---|---|
@@ -42,9 +44,9 @@ Software: a container runtime (**rootless Podman** — already running this host
 
 The only place Docker has an edge is **NemoClaw**, whose tested Linux path is Docker (on fresh docker-ce installs with the containerd image store enabled, `nemoclaw onboard` handles the fuse-overlayfs workaround automatically). NemoClaw is intentionally deferred to a post-baseline experiment in [Phase 6](#phase-6--nemoclaw-experiment-deferred) — the entire agent baseline (Phases 2–5) stays on Podman.
 
-**Decision: stay on Podman; do not install Docker now.** One runtime means one network model — agent sandboxes can share `ai-net` with Traefik/Portainer instead of straddling a Docker bridge and a separate Podman network. Install Docker only when you reach the Phase 6 NemoClaw experiment, where it runs as an isolated island alongside the Podman services.
+**Decision: start on Podman; don't install Docker preemptively.** One runtime means one network model — sandboxes can share `ai-net` with Traefik/Portainer instead of straddling a Docker bridge and a separate Podman network. But Podman-first is a **preference, not a hard rule** (see the rootless note below): if OpenShell turns out to need Docker, install it and move on. Either way, Docker comes in for the Phase 6 NemoClaw experiment.
 
-> ⚠️ **Verify before relying on it:** OpenShell's docs say "Podman" but don't specify **rootless** Podman, which is how the existing services run. OpenShell's per-sandbox L7 network enforcement may want root or extra privileges. Confirm rootless Podman works for the sandbox compute driver during Phase 2; if it needs rootful Podman, that's still Podman (no Docker) but a different security posture.
+> **On rootless specifically:** OpenShell's docs say "Podman" but don't specify *rootless* Podman, and its per-sandbox L7 network enforcement may want root or extra privileges. **This is a development host, not a security-sensitive environment** — so rootless is a preference (consistency with the existing services), not a constraint. If the Phase 2 spike shows OpenShell needs rootful Podman or Docker, switching is an accepted trade-off — don't burn time forcing rootless. What *does* still matter: verify deny-by-default policy enforcement actually works in whichever mode you land on.
 
 ---
 

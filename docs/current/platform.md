@@ -43,7 +43,7 @@
 |---|---|---|
 | OS | Debian 13 (trixie) | |
 | Podman runtime | rootless Podman 5.4.2 (overlay) | for Quadlet services |
-| Docker Engine | not installed | required for OpenShell (see future plan) |
+| Docker Engine | not installed | OpenShell can run on Podman; Docker is an optional fallback, and is needed for the Phase 6 NemoClaw experiment (see future plan) |
 | User | `debian` uid 1000, `sudo` | linger enabled — services survive logout |
 | CPU / RAM | 4 vCPU / 15 GB | meets minimum; 8 vCPU / 16–24 GB recommended for multi-agent |
 | Disk | 108 GB total, ~101 GB free | resized from 8 GB; no LVM |
@@ -60,7 +60,7 @@
 ### Pending
 
 - [ ] **AdGuard wildcard:** add `*.lab.lan → 192.168.0.51` rewrite so lab hostnames resolve from LAN clients
-- [ ] **Docker Engine:** required for OpenShell agent sandboxes ([Phase 1](../future/ai-dev-ground.md#phase-1--vm-base-prep))
+- [ ] **Docker Engine (optional):** OpenShell runs on the existing rootless Podman; install Docker only if the Phase 2 spike shows OpenShell needs it, or for the Phase 6 NemoClaw experiment ([Phase 1](../future/ai-dev-ground.md#phase-1--vm-base-prep))
 - [ ] **Local image registry:** `registry/registry.container` Quadlet on `localhost:5000`
 - [ ] **Podman secrets:** `anthropic_api_key`, AWS Bedrock creds
 - [ ] **`bootstrap/setup-host.sh`:** idempotent rebuild script (ai-net, Traefik, registry, linger)
