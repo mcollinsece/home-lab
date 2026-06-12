@@ -42,8 +42,10 @@
 | Resource | Value | Notes |
 |---|---|---|
 | OS | Debian 13 (trixie) | |
-| Podman runtime | rootless Podman 5.4.2 (overlay) | for Quadlet services |
-| Docker Engine | not installed | OpenShell can run on Podman; Docker is an optional fallback, and is needed for the Phase 6 NemoClaw experiment (see future plan) |
+| Podman runtime | rootless Podman 5.4.2 (overlay) | for Quadlet services + OpenShell sandboxes |
+| Node.js | v22.22.3 / npm 10.9.8 | NodeSource; Phase 1 prereq |
+| OpenShell | v0.0.62 | agent sandbox runtime; gateway on `:17670`, Podman driver |
+| Docker Engine | not installed | OpenShell runs on Podman; Docker is an optional fallback, and is needed for the Phase 6 NemoClaw experiment (see future plan) |
 | User | `debian` uid 1000, `sudo` | linger enabled — services survive logout |
 | CPU / RAM | 4 vCPU / 15 GB | meets minimum; 8 vCPU / 16–24 GB recommended for multi-agent |
 | Disk | 108 GB total, ~101 GB free | resized from 8 GB; no LVM |
@@ -56,14 +58,39 @@
 | `ai-net` | Podman bridge network | internal | ✅ |
 | Traefik | Podman Quadlet | label-discovery via `podman.sock`, port `:80` | ✅ |
 | Portainer | Podman Quadlet | `portainer.lab.lan` | ✅ |
+| OpenShell gateway | systemd `--user` service | `0.0.0.0:17670` (mTLS), Podman driver, `openshell` bridge | ✅ |
+| `claude-code` sandbox | OpenShell sandbox (Podman) | outbound-only; policy `openshell/policies/claude-code.yaml` | ✅ awaiting `claude login` |
+
+> **OpenShell config note:** the gateway must bind `0.0.0.0:17670` (not the Debian `.deb` default of `127.0.0.1`) so sandbox containers can reach it over the host bridge. Driver + bind live in [`openshell/gateway.env`](../../openshell/gateway.env) (`OPENSHELL_DRIVERS=podman`, `OPENSHELL_BIND_ADDRESS=0.0.0.0`), git-managed and symlinked to `~/.config/openshell/gateway.env` by the bootstrap script. mTLS gates the wider bind. `openshell doctor check` falsely errors on Docker even when Podman is active — cosmetic.
+
+### Reproducing this host
+
+This server is **transitional** — not its forever home — so everything is
+designed to rebuild from a clean checkout:
+
+```bash
+git clone <repo> ~/home-lab && ~/home-lab/bootstrap/setup-host.sh
+```
+
+[`bootstrap/setup-host.sh`](../../bootstrap/setup-host.sh) is idempotent and
+reproduces: base packages, Node 22, linger, the Podman socket, the Quadlet
+symlinks (ai-net/Traefik/Portainer), OpenShell (pinned `v0.0.62`), and the
+git-managed `gateway.env` symlink. It deliberately leaves out anything sensitive
+or interactive — those are tracked in [todos.md](todos.md).
 
 ### Pending
 
-- [ ] **AdGuard wildcard:** add `*.lab.lan → 192.168.0.51` rewrite so lab hostnames resolve from LAN clients
-- [ ] **Docker Engine (optional):** OpenShell runs on the existing rootless Podman; install Docker only if the Phase 2 spike shows OpenShell needs it, or for the Phase 6 NemoClaw experiment ([Phase 1](../future/ai-dev-ground.md#phase-1--vm-base-prep))
-- [ ] **Local image registry:** `registry/registry.container` Quadlet on `localhost:5000`
-- [ ] **Podman secrets:** `anthropic_api_key`, AWS Bedrock creds
-- [ ] **`bootstrap/setup-host.sh`:** idempotent rebuild script (ai-net, Traefik, registry, linger)
+Outstanding work (manual/sensitive/interactive items + next phases) lives in
+**[todos.md](todos.md)**. Headlines:
+
+- [ ] **AdGuard wildcard** `*.lab.lan → 192.168.0.51` (on the AdGuard LXC `.53`)
+- [ ] **`claude login`** to finish Phase 2 (interactive OAuth)
+- [ ] Phase 3 Bedrock dual-auth; local registry `:5000`; Podman secrets
+- [x] ~~Node 22~~ · ~~OpenShell + first sandbox~~ · ~~`setup-host.sh`~~ — done
+
+> **Docker Engine:** confirmed **not** needed for the agent baseline — OpenShell
+> runs natively on rootless Podman. Install only for the deferred Phase 6
+> NemoClaw experiment.
 
 ---
 

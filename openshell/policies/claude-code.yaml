@@ -1,0 +1,40 @@
+# Claude Code sandbox policy — Max/Pro subscription (OAuth) auth.
+#
+# Phase 2 of docs/future/ai-dev-ground.md. Deny-by-default egress; this opens
+# only the hosts Claude Code needs. Pure L4 (host:port + binary identity), no L7
+# method inspection — streaming inference and the OAuth login flow break under a
+# read-only L7 preset, and "just let everything through" for the claude binary
+# is the documented pattern (OpenShell generate-sandbox-policy example M1).
+#
+# Apply at create:   openshell sandbox create --policy openshell/policies/claude-code.yaml -- claude
+# Hot-reload:        openshell policy set <name> --policy openshell/policies/claude-code.yaml --wait
+
+version: 1
+
+# Static fields are required because `openshell policy set` / `--policy` replaces
+# the entire policy. /sandbox is read-write so the agent can edit code.
+filesystem_policy:
+  include_workdir: true
+  read_only: [/usr, /lib, /proc, /dev/urandom, /app, /etc, /var/log]
+  read_write: [/sandbox, /tmp, /dev/null]
+landlock:
+  compatibility: best_effort
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+
+network_policies:
+  claude_anthropic:
+    name: claude-anthropic
+    endpoints:
+      # Inference + OAuth token exchange
+      - { host: api.anthropic.com, port: 443 }
+      # Subscription OAuth authorize (claude login)
+      - { host: claude.ai, port: 443 }
+      - { host: console.anthropic.com, port: 443 }
+      # Feature flags / telemetry Claude Code pings on startup
+      - { host: statsig.anthropic.com, port: 443 }
+      - { host: sentry.io, port: 443 }
+    binaries:
+      - { path: /usr/local/bin/claude }
+      - { path: /usr/bin/claude }
