@@ -27,7 +27,7 @@ All `*.lab.lan` names resolve via AdGuard's wildcard rewrite (`*.lab.lan → 192
 
 | Doc | What it covers |
 |---|---|
-| [docs/current/network-overview.md](docs/current/network-overview.md) | Hardware, IPs, running services, pending items — single source of truth |
+| [docs/current/platform.md](docs/current/platform.md) | Hardware, IPs, running services, pending items — single source of truth |
 
 **Future plans**
 

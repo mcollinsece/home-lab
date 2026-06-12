@@ -2,7 +2,7 @@
 
 **Target:** Debian VM running NVIDIA OpenShell + NemoClaw + NeMo Agent Toolkit, hosting sandboxed coding agents (Claude Code first, then Codex and Gemini CLI) with per-project switching between Claude Max/Pro subscription and Bedrock.
 
-> **Current infrastructure state:** [../current/network-overview.md](../current/network-overview.md) — hardware, IPs, running services, pending items
+> **Current platform state:** [../current/platform.md](../current/platform.md) — hardware, IPs, running services, pending items
 
 ---
 
