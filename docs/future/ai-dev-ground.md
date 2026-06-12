@@ -47,6 +47,8 @@ The only place Docker has an edge is **NemoClaw**, whose tested Linux path is Do
 **Decision: start on Podman; don't install Docker preemptively.** One runtime means one network model — sandboxes can share `ai-net` with Traefik/Portainer instead of straddling a Docker bridge and a separate Podman network. But Podman-first is a **preference, not a hard rule** (see the rootless note below): if OpenShell turns out to need Docker, install it and move on. Either way, Docker comes in for the Phase 6 NemoClaw experiment.
 
 > **On rootless specifically:** OpenShell's docs say "Podman" but don't specify *rootless* Podman, and its per-sandbox L7 network enforcement may want root or extra privileges. **This is a development host, not a security-sensitive environment** — so rootless is a preference (consistency with the existing services), not a constraint. If the Phase 2 spike shows OpenShell needs rootful Podman or Docker, switching is an accepted trade-off — don't burn time forcing rootless. What *does* still matter: verify deny-by-default policy enforcement actually works in whichever mode you land on.
+>
+> **Validated (2026-06-12):** OpenShell v0.0.62 has a first-class `driver-podman` and runs fine on the existing **rootless** Podman (`OPENSHELL_DRIVERS=podman`, gateway bound `0.0.0.0:17670`). The supervisor enforces isolation *inside* each container (root via userns, not host root). Deny-by-default and L7 method/host enforcement both confirmed working — no rootful, no Docker. See [current state](../current/platform.md) for the exact config.
 
 ---
 
@@ -96,25 +98,25 @@ Picking Quadlets now is deliberate: the key/value shape (`Image=`, `Environment=
 ```
 home-lab/
 ├── README.md                       ✅ repo index + quick-add-service guide
-├── .gitignore                      ✅ **/*.env, !*.env.example, *.key, age keys
+├── .gitignore                      ✅ **/*.env, !*.env.example, !openshell/gateway.env, *.key
 ├── docs/
 │   ├── current/
-│   │   └── platform.md             ✅ hardware, IPs, running services, pending items
+│   │   ├── platform.md             ✅ hardware, IPs, running services — current state
+│   │   └── todos.md                ✅ human punchlist (manual/sensitive/interactive)
 │   └── future/
 │       └── ai-dev-ground.md        ✅ this file — AI stack plan
+├── bootstrap/
+│   └── setup-host.sh               ✅ idempotent host rebuild (Node, OpenShell, links)
 ├── networks/
 │   └── ai-net.network              ✅ Quadlet: shared internal bridge
-├── traefik/
-│   ├── traefik.yml                 ✅ Traefik static config
-│   ├── traefik.container           ✅ Quadlet for the reverse proxy
-│   └── README.md                   ✅ how to expose a service
-├── portainer/
-│   ├── portainer.container         ✅ Quadlet: container-management UI
-│   └── portainer-data.volume       ✅ Quadlet: persistent Portainer state
+├── traefik/                        ✅ static config + Quadlet + README
+├── portainer/                      ✅ Quadlet + data volume
+├── openshell/                      ✅ agent sandbox runtime
+│   ├── gateway.env                 ✅ gateway driver+bind (symlinked into ~/.config)
+│   ├── policies/claude-code.yaml   ✅ Claude Code network policy (subscription)
+│   └── README.md                   ✅ reproduce + sandbox lifecycle
 ├── projects/
 │   └── _template/                  ✅ copy this to start a new service
-├── bootstrap/
-│   └── setup-host.sh               ☐ idempotent: linger, ai-net, registry, dirs
 ├── registry/
 │   └── registry.container          ☐ Quadlet for the local image registry
 └── k8s/                            ☐ (future) manifests the Quadlets graduate into
@@ -122,66 +124,34 @@ home-lab/
 
 ---
 
-## Phase 1 — VM base prep
+## Phases 1–2 — base prep + OpenShell ✅ DONE
 
-The host already runs **rootless Podman** for Traefik/Portainer, which is the runtime OpenShell will use (see [Runtime: Podman vs Docker](#runtime-podman-vs-docker)). So base prep is just system packages + Node 22 — **no Docker on the critical path.**
+Built 2026-06-12 and reproducible from a clean checkout via
+[`bootstrap/setup-host.sh`](../../bootstrap/setup-host.sh). Current-state details
+in [platform.md](../current/platform.md); OpenShell specifics in
+[openshell/README.md](../../openshell/README.md). In short:
 
-```bash
-# As root or with sudo on Debian
-apt update && apt upgrade -y
-apt install -y curl git ca-certificates gnupg
+- **Phase 1:** Node 22 (`node v22.22.3`) on the existing rootless Podman. No Docker
+  on the critical path; the optional Docker Engine install is deferred to Phase 6.
+- **Phase 2:** OpenShell `v0.0.62` on **rootless Podman** (native `driver-podman`,
+  gateway bound `0.0.0.0:17670`). Isolation verified — deny-by-default egress plus
+  L7 host/method enforcement. The `claude-code` sandbox is `Ready` with
+  [`openshell/policies/claude-code.yaml`](../../openshell/policies/claude-code.yaml);
+  all four agents (claude/codex/opencode/copilot) ship in the base image. The
+  OpenShell repo is cloned at `/home/debian/OpenShell` for its agent skills
+  (`.agents/skills/`, incl. `generate-sandbox-policy`).
 
-# Node 22 LTS (NodeSource)
-curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-apt install -y nodejs
-node -v   # must be >= 22.16
-```
+`claude login` (Max/Pro OAuth) is done and the AdGuard `*.lab.lan` wildcard is
+live — **Phase 2 complete.**
 
-Hygiene: SSH key-only auth; this VM holds live credentials, keep it off any exposed network segment.
+**Reproducibility re-verified 2026-06-12:** `setup-host.sh` re-run end-to-end with
+all checks green, and the manual post-steps confirmed (sandbox `Ready`/healthy,
+`claude login` + live prompt through the egress policy, `portainer.lab.lan` → 200).
+This was an idempotent re-run over the live host, not a clean snapshot-revert — the
+from-scratch rebuild stays unproven-but-low-risk, to be exercised at the real
+migration (see [todos.md](../current/todos.md)).
 
-<details>
-<summary><b>Optional: Docker Engine — only for the deferred NemoClaw experiment (Phase 6)</b></summary>
-
-```bash
-# Docker Engine (official repo — Debian's docker.io package is often stale)
-install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
-chmod a+r /etc/apt/keyrings/docker.asc
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
-  https://download.docker.com/linux/debian $(. /etc/os-release && echo $VERSION_CODENAME) stable" \
-  > /etc/apt/sources.list.d/docker.list
-apt update && apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-usermod -aG docker $USER   # log out/in after
-```
-
-Docker and rootless Podman coexist fine. On fresh docker-ce installs with the containerd image store enabled, `nemoclaw onboard` handles the fuse-overlayfs workaround automatically.
-</details>
-
-## Phase 2 — OpenShell + first Claude Code sandbox  ← START HERE
-
-```bash
-# Install OpenShell (binary installer)
-curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh
-
-# Create a Claude Code sandbox
-openshell sandbox create -- claude
-```
-
-Useful commands:
-
-```bash
-openshell sandbox list
-openshell sandbox connect <name>                              # SSH into the sandbox
-openshell policy set <name> --policy policy.yaml --wait      # hot-reload network policy
-openshell logs <name> --tail
-openshell term                                               # k9s-style live TUI
-```
-
-Verify isolation: inside the sandbox, `curl https://api.github.com/zen` should return a 403 from the proxy until you apply a policy allowing it. The repo's `examples/sandbox-policy-quickstart/` has a runnable demo.
-
-Also clone `https://github.com/NVIDIA/OpenShell.git` on the VM — the repo ships agent skills (`.agents/skills/`) for CLI help, gateway debugging, and **policy generation from plain English** (`generate-sandbox-policy`).
-
-## Phase 3 — Dual auth: Max/Pro subscription ↔ Bedrock per project
+## Phase 3 — Dual auth: Max/Pro subscription ↔ Bedrock per project  ← START HERE
 
 Claude Code picks its backend per project via settings precedence (project `.claude/settings.json` overrides user `~/.claude/settings.json`). Subscription OAuth is the default; Bedrock is opt-in via env.
 
@@ -372,17 +342,18 @@ When you add a second/third Optiplex:
 
 ## Order of operations
 
-**Pre-work (see [current state](../current/platform.md#pending) for detail):**
+**Pre-work (see [todos.md](../current/todos.md) for detail):**
 
-- [ ] AdGuard wildcard `*.lab.lan → 192.168.0.51`
+- [x] `bootstrap/setup-host.sh` — idempotent host rebuild
+- [x] AdGuard wildcard `*.lab.lan → 192.168.0.51` (on AdGuard LXC `.53`)
 - [ ] Podman secrets: `anthropic_api_key`, AWS Bedrock creds
-- [ ] `bootstrap/setup-host.sh`
+- [ ] Local image registry `:5000`
 
 **Phases:**
 
-1. [ ] Phase 1: Node 22 (Podman already present; Docker optional, NemoClaw-only)
-2. [ ] Phase 2: OpenShell + Claude Code sandbox ← **initial setup goal**
-3. [ ] Phase 3: Subscription + Bedrock providers, per-project switching
+1. [x] Phase 1: Node 22 (Podman already present; Docker optional, NemoClaw-only) — `node v22.22.3`
+2. [x] Phase 2: OpenShell + Claude Code sandbox — v0.0.62 on **rootless Podman** (Podman-first premise validated, no Docker); `claude-code` sandbox Ready, `claude login` done, AdGuard `*.lab.lan` wildcard live. **Complete.**
+3. [ ] Phase 3: Subscription + Bedrock providers, per-project switching ← **next**
 4. [ ] Phase 4: Codex sandbox; Gemini CLI BYOC sandbox
 5. [ ] Phase 5: Always-on OpenClaw assistant (direct BYOC on Podman) — **completes the Podman baseline**
 6. [ ] Phase 6: NemoClaw experiment (deferred; the one Docker service) — explore after baseline
@@ -393,7 +364,7 @@ When you add a second/third Optiplex:
 ## Caveats
 
 - **Everything NVIDIA here is alpha** (OpenShell and NemoClaw both carry "do not use in production" banners). Pin versions where you can (`OPENSHELL_VERSION`).
-- The blog's `--remote spark` flow targets DGX Spark; the no-GPU Debian VM uses the plain Docker path, which is the primary tested one.
+- The blog's `--remote spark` flow targets DGX Spark; the no-GPU Debian VM runs OpenShell on **rootless Podman** (`driver-podman`), validated end-to-end — Docker is not required for the agent baseline.
 - Subscription (Max/Pro) use in long-running automated loops can hit rate limits — Bedrock is the better default for unattended/batch work; subscription for interactive sessions.
 - Verify current Bedrock model IDs in the [Claude Code Bedrock docs](https://code.claude.com/docs/en/amazon-bedrock) when you get there.
 - Pin image tags — no `:latest`. Secrets out of git. One Quadlet per project for clean teardown.

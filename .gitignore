@@ -2,6 +2,9 @@
 **/*.env
 !**/*.env.example
 !**/env.example
+# Exception: OpenShell gateway config — driver + bind only, NO secrets.
+# Symlinked to ~/.config/openshell/gateway.env by bootstrap/setup-host.sh.
+!openshell/gateway.env
 *.key
 *.age
 

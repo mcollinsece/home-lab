@@ -27,7 +27,8 @@ All `*.lab.lan` names resolve via AdGuard's wildcard rewrite (`*.lab.lan → 192
 
 | Doc | What it covers |
 |---|---|
-| [docs/current/platform.md](docs/current/platform.md) | Hardware, IPs, running services, pending items — single source of truth |
+| [docs/current/platform.md](docs/current/platform.md) | Hardware, IPs, running services — single source of truth |
+| [docs/current/todos.md](docs/current/todos.md) | Human punchlist: manual/sensitive/interactive steps + next phases |
 
 **Future plans**
 
@@ -40,6 +41,20 @@ All `*.lab.lan` names resolve via AdGuard's wildcard rewrite (`*.lab.lan → 192
 | Doc | What it covers |
 |---|---|
 | [traefik/README.md](traefik/README.md) | How to expose a service via Traefik labels |
+| [openshell/README.md](openshell/README.md) | Agent sandboxes (Claude Code etc.) on rootless Podman |
+
+## Reproduce the host
+
+This server is transitional — rebuild from a clean checkout:
+
+```bash
+git clone <repo> ~/home-lab && ~/home-lab/bootstrap/setup-host.sh
+```
+
+[`bootstrap/setup-host.sh`](bootstrap/setup-host.sh) is idempotent: base packages,
+Node 22, linger, Podman socket, Quadlet symlinks, OpenShell, and the git-managed
+`gateway.env`. Sensitive/interactive bits stay in [todos.md](docs/current/todos.md);
+when a rebuild misbehaves, see [bootstrap/TROUBLESHOOTING.md](bootstrap/TROUBLESHOOTING.md).
 
 ## Adding a new service
 
