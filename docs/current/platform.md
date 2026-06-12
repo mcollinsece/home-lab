@@ -89,13 +89,39 @@ or interactive — those are tracked in [todos.md](todos.md).
 > low-risk (repo + [TROUBLESHOOTING.md](../../bootstrap/TROUBLESHOOTING.md) are the
 > durability guarantee, not a VM snapshot). See [todos.md](todos.md) for the detail.
 
+### Agent sandbox lifecycle (important)
+
+OpenShell sandboxes are **container-local, manually-initialized state** — there is
+no provider configured to auto-inject credentials (`openshell provider list` →
+none), and no provider type fits this setup's auth anyway (subscription is
+interactive OAuth; Bedrock needs env-var keys for SigV4). Consequences:
+
+- **A brand-new sandbox starts blank** — fresh `/sandbox` from the base image, zero
+  auth. Auth is initialized only by what you put into the create flow: `claude
+  login` (subscription) and AWS keys via `--env` at create or a `settings.json`
+  merge (Bedrock). Nothing carries over from the existing `claude-code` sandbox.
+- **The existing `claude-code` sandbox holds its auth** in `/sandbox/.claude/`
+  (`.credentials.json` = subscription, `settings.json` env = AWS keys). It persists
+  across `exec`/`connect` and survives on disk as long as the container isn't
+  *removed*.
+- **Not pinned across reboot:** the sandbox container's restart policy is `no` and
+  there's no systemd/Quadlet unit — after a host reboot it may need a restart
+  (Phase 5's always-on OpenClaw will need a Quadlet/restart policy). A snapshot
+  revert wipes it entirely → re-do the manual auth steps.
+
+A reproducible spawn script (`bootstrap/new-claude-sandbox.sh`) is tracked in
+[todos.md](todos.md).
+
 ### Pending
 
 Outstanding work (manual/sensitive/interactive items + next phases) lives in
 **[todos.md](todos.md)**. Headlines:
 
-- [ ] Phase 3 Bedrock dual-auth; local registry `:5000`; Podman secrets
-- [x] ~~Node 22~~ · ~~OpenShell + first sandbox~~ · ~~`setup-host.sh`~~ · ~~AdGuard `*.lab.lan` wildcard~~ · ~~`claude login`~~ — **Phase 2 complete**
+- [ ] Phase 4 Codex + Gemini CLI sandboxes; local registry `:5000`; reproducible
+      sandbox-spawn script; Podman secrets
+- [x] ~~Phase 1 (Node 22)~~ · ~~Phase 2 (OpenShell + Claude Code subscription)~~ ·
+      ~~`setup-host.sh`~~ · ~~AdGuard `*.lab.lan` wildcard~~ ·
+      ~~**Phase 3 Bedrock dual-auth**~~ — **done (2026-06-12)**
 
 > **Docker Engine:** confirmed **not** needed for the agent baseline — OpenShell
 > runs natively on rootless Podman. Install only for the deferred Phase 6
@@ -116,6 +142,8 @@ Internet
     │     └── 192.168.0.51  homelab VM (Debian 13)
     │           ├── Traefik (Quadlet) — label-based reverse proxy on :80
     │           ├── Portainer (Quadlet) — portainer.lab.lan
+    │           ├── OpenShell gateway (systemd --user) — :17670, deny-by-default
+    │           │     └── claude-code sandbox (Podman) — outbound-only, dual-auth
     │           └── projects/ — one Quadlet per service on ai-net
     └── ... other devices via AdGuard DHCP
 ```

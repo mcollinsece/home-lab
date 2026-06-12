@@ -71,6 +71,15 @@ Manual, sensitive, or interactive steps the bootstrap can't do. See
       creds for agents — subscription via `claude login`, AWS Bedrock keys via the
       sandbox `~/.claude/settings.json` `env` block (see Phase 3). A snapshot revert
       wipes both → re-add manually.
+- [ ] **`bootstrap/new-claude-sandbox.sh <name>` — reproducible auth-ready spawn.**
+      New sandboxes start blank (no provider auto-injects creds; see platform.md
+      "Agent sandbox lifecycle"). Script should: source AWS keys from a gitignored
+      `~/home-lab/.secrets/bedrock.env` (never argv/git) → `openshell sandbox create
+      … --policy … --env AWS_*` → `--upload` the non-secret Bedrock project
+      `settings.json` → print the one manual step left (`claude login`, OAuth can't
+      be scripted) or offer to clone `.credentials.json` from the live sandbox.
+      Open question for me: re-login per sandbox (isolation) vs clone one token (no
+      re-login, shared subscription session).
 
 ## Phase 3 — Bedrock dual auth — COMPLETE ✅ (2026-06-12, us-east-1 + Sonnet 4.6)
 Design: subscription (OAuth) stays the **default**; Bedrock is **opt-in per

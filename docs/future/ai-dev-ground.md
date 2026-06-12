@@ -210,6 +210,34 @@ hot-reloaded onto the live sandbox, **done 2026-06-12 — policy v2**) allows bo
 
 Switching = `cd` into a project; no re-auth, no sandbox rebuild.
 
+### Sandbox lifecycle & reproducibility (read before Phase 4)
+
+How a sandbox gets its auth matters once there's more than one. Established
+2026-06-12:
+
+- **Nothing auto-initializes.** `openshell provider list` is empty, and no provider
+  *type* fits this auth: subscription is interactive OAuth (no provider exists for
+  it), and Bedrock needs the AWS keys as **env vars in the sandbox** for SigV4 (no
+  AWS provider type in v0.0.62, and the egress proxy can't re-sign). Credentials are
+  therefore **container-local state you place by hand**, not gateway-injected.
+- **A brand-new sandbox starts blank** — fresh `/sandbox` from
+  `ghcr.io/nvidia/.../sandboxes/base:latest`, no creds. Initialize per sandbox:
+  - *Subscription:* `claude login` inside it (browser OAuth) — or copy a working
+    `.credentials.json` in via `openshell sandbox download`/`upload` (the refresh
+    token keeps working).
+  - *Bedrock:* `openshell sandbox create … --env AWS_ACCESS_KEY_ID=… --env
+    AWS_SECRET_ACCESS_KEY=… --env AWS_REGION=us-east-1`, or merge/upload a
+    `settings.json` after create.
+- **The live `claude-code` sandbox keeps its auth** in `/sandbox/.claude/` across
+  reconnects and on disk — but it is **not pinned to survive a reboot** (restart
+  policy `no`, no systemd/Quadlet unit). Phase 5's always-on OpenClaw will need a
+  Quadlet/restart policy precisely for this reason.
+- **Reproducible spawn is a TODO** — `bootstrap/new-claude-sandbox.sh` (see
+  [todos.md](../current/todos.md)) folds the create-with-`--env` + policy + settings
+  upload into one command, leaving only `claude login` manual. This is the missing
+  piece between "works on the one sandbox I hand-built" and "spawn an auth-ready
+  agent on any host."
+
 ## Phase 4 — Add Codex and Gemini CLI
 
 - **Codex**: already in the base sandbox image. `openshell sandbox create -- codex`; provider uses `OPENAI_API_KEY`; policy needs `api.openai.com`.
