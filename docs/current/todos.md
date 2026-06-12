@@ -72,32 +72,30 @@ Manual, sensitive, or interactive steps the bootstrap can't do. See
       sandbox `~/.claude/settings.json` `env` block (see Phase 3). A snapshot revert
       wipes both → re-add manually.
 
-## Phase 3 — Bedrock dual auth (IN PROGRESS — decided us-east-1 + Sonnet 4.6)
+## Phase 3 — Bedrock dual auth — COMPLETE ✅ (2026-06-12, us-east-1 + Sonnet 4.6)
 Design: subscription (OAuth) stays the **default**; Bedrock is **opt-in per
 project**. Correction baked in 2026-06-12: OpenShell v0.0.62 has **no AWS provider
-type** and can't SigV4-sign, so the original `openshell provider create` plan is
+type** and can't SigV4-sign, so the original `openshell provider create` plan was
 dead — AWS keys live **inside the sandbox as env vars** (Claude Code's AWS SDK
-signs). Egress policy already handles Bedrock.
+signs); egress handled by the policy.
 
 - [x] **Network policy → Bedrock egress** — `openshell/policies/claude-code.yaml`
       v2 hot-reloaded onto the live `claude-code` sandbox (bedrock-runtime
       us-east-1/2 + us-west-2, bedrock.us-east-1). No `sts.*` for static keys.
-- [ ] **Create a scoped IAM user** — `bedrock:InvokeModel`,
-      `InvokeModelWithResponseStream`, `ListInferenceProfiles`, `GetInferenceProfile`
-      on `inference-profile/*` + `foundation-model/*`, plus the marketplace
-      subscribe condition (see Claude Code Bedrock IAM block). Store keys in my vault.
-      First-time only: submit the Bedrock model-access use-case form in the console.
-- [ ] **Put AWS keys in the sandbox** (no rebuild) — add to the sandbox user
-      `~/.claude/settings.json` `env` block (`AWS_ACCESS_KEY_ID`,
-      `AWS_SECRET_ACCESS_KEY`, `AWS_REGION=us-east-1`) via `openshell sandbox exec
-      claude-code`. Keys stay out of git. (On a future rebuild, prefer
-      `openshell sandbox create … --env AWS_ACCESS_KEY_ID=… …` instead.)
-- [ ] **Bedrock project settings** — in a test project inside the sandbox, write
-      `.claude/settings.json` with `{"env":{"CLAUDE_CODE_USE_BEDROCK":"1",
-      "AWS_REGION":"us-east-1","ANTHROPIC_MODEL":"us.anthropic.claude-sonnet-4-6"}}`.
-- [ ] **Verify** — `cd` into the Bedrock project, run `claude`, confirm `/status`
-      shows `Amazon Bedrock`, run a prompt; `cd` to any other dir → back to
-      subscription. (Egress already proven for both paths via policy v2.)
+- [x] **Scoped IAM user** created (`bedrock:InvokeModel*` + inference-profile read
+      + marketplace subscribe condition); Sonnet 4.6 model access granted in us-east-1.
+- [x] **AWS keys in the sandbox** — merged into the sandbox user
+      `~/.claude/settings.json` `env` block (inert until a project opts in);
+      subscription `.credentials.json` untouched. (On rebuild: `sandbox create … --env`.)
+- [x] **Bedrock project settings** — `/sandbox/bedrock-test/.claude/settings.json`
+      sets `CLAUDE_CODE_USE_BEDROCK=1` + `us.anthropic.claude-sonnet-4-6`.
+- [x] **Verified both paths** — `claude -p` from `/sandbox/bedrock-test` → Bedrock
+      Sonnet 4.6 (`bedrock-ok`); from `/sandbox` → subscription (`subscription-ok`).
+      `cd`-based switch works, no re-auth.
+
+> ⚠️ **Rotate the current IAM access key** — it was pasted in a Claude chat to do
+> the setup, so it lives in that transcript + host shell history. Generate a fresh
+> key in IAM, re-run the in-sandbox merge with the new one, delete the old key.
 
 ## Later phases (no blockers, just sequencing)
 - [ ] Phase 4 — Codex sandbox (`OPENAI_API_KEY`) + Gemini CLI BYOC sandbox.

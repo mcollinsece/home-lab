@@ -151,7 +151,7 @@ This was an idempotent re-run over the live host, not a clean snapshot-revert �
 from-scratch rebuild stays unproven-but-low-risk, to be exercised at the real
 migration (see [todos.md](../current/todos.md)).
 
-## Phase 3 — Dual auth: Max/Pro subscription ↔ Bedrock per project  ← START HERE
+## Phase 3 — Dual auth: Max/Pro subscription ↔ Bedrock per project  ✅ DONE (2026-06-12)
 
 Claude Code picks its backend per project via settings precedence (project `.claude/settings.json` overrides user `~/.claude/settings.json`). Subscription OAuth is the default; Bedrock is opt-in via env.
 
@@ -382,9 +382,9 @@ When you add a second/third Optiplex:
 
 1. [x] Phase 1: Node 22 (Podman already present; Docker optional, NemoClaw-only) — `node v22.22.3`
 2. [x] Phase 2: OpenShell + Claude Code sandbox — v0.0.62 on **rootless Podman** (Podman-first premise validated, no Docker); `claude-code` sandbox Ready, `claude login` done, AdGuard `*.lab.lan` wildcard live. **Complete.**
-3. [~] Phase 3: Subscription ↔ Bedrock per-project switching ← **in progress** —
-   policy v2 (Bedrock egress) live; region us-east-1, default `us.anthropic.claude-sonnet-4-6`;
-   remaining: add AWS creds in-sandbox + first Bedrock invocation (see todos.md)
+3. [x] Phase 3: Subscription ↔ Bedrock per-project switching — **complete** —
+   policy v2 (Bedrock egress), us-east-1, default `us.anthropic.claude-sonnet-4-6`;
+   both paths verified via `claude -p` (Bedrock from project dir, subscription elsewhere)
 4. [ ] Phase 4: Codex sandbox; Gemini CLI BYOC sandbox
 5. [ ] Phase 5: Always-on OpenClaw assistant (direct BYOC on Podman) — **completes the Podman baseline**
 6. [ ] Phase 6: NemoClaw experiment (deferred; the one Docker service) — explore after baseline
