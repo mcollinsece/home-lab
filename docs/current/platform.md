@@ -61,7 +61,7 @@
 | Traefik | Podman Quadlet | label-discovery via `podman.sock`, port `:80` | ✅ |
 | Portainer | Podman Quadlet | `portainer.lab.lan` | ✅ |
 | OpenShell gateway | systemd `--user` service | `0.0.0.0:17670` (mTLS), Podman driver, `openshell` bridge | ✅ |
-| `claude-code` sandbox | OpenShell sandbox (Podman) | outbound-only; policy `openshell/policies/claude-code.yaml` | ✅ awaiting `claude login` |
+| `claude-code` sandbox | OpenShell sandbox (Podman) | outbound-only; policy `openshell/policies/claude-code.yaml` | ✅ `claude login` done; live prompt verified through the egress policy |
 
 > **OpenShell config note:** the gateway must bind `0.0.0.0:17670` (not the Debian `.deb` default of `127.0.0.1`) so sandbox containers can reach it over the host bridge. Driver + bind live in [`openshell/gateway.env`](../../openshell/gateway.env) (`OPENSHELL_DRIVERS=podman`, `OPENSHELL_BIND_ADDRESS=0.0.0.0`), git-managed and symlinked to `~/.config/openshell/gateway.env` by the bootstrap script. mTLS gates the wider bind. `openshell doctor check` falsely errors on Docker even when Podman is active — cosmetic.
 
@@ -79,6 +79,15 @@ reproduces: base packages, Node 22, linger, the Podman socket, the Quadlet
 symlinks (ai-net/Traefik/Portainer), OpenShell (pinned `v0.0.62`), and the
 git-managed `gateway.env` symlink. It deliberately leaves out anything sensitive
 or interactive — those are tracked in [todos.md](todos.md).
+
+> **Verified 2026-06-12:** re-ran end-to-end and confirmed every checklist item
+> (Node 22, OpenShell `v0.0.62`, gateway + `podman.socket` active, `driver=podman`,
+> bind `0.0.0.0:17670`, `Connected`), plus the manual post-steps — `claude-code`
+> sandbox `Ready`/healthy, `claude login` + a live prompt through the egress policy,
+> and `portainer.lab.lan` → Traefik 200. This was an **idempotent re-run over the
+> live host**, not a clean snapshot-revert; the from-scratch rebuild is unproven but
+> low-risk (repo + [TROUBLESHOOTING.md](../../bootstrap/TROUBLESHOOTING.md) are the
+> durability guarantee, not a VM snapshot). See [todos.md](todos.md) for the detail.
 
 ### Pending
 

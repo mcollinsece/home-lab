@@ -144,6 +144,13 @@ in [platform.md](../current/platform.md); OpenShell specifics in
 `claude login` (Max/Pro OAuth) is done and the AdGuard `*.lab.lan` wildcard is
 live — **Phase 2 complete.**
 
+**Reproducibility re-verified 2026-06-12:** `setup-host.sh` re-run end-to-end with
+all checks green, and the manual post-steps confirmed (sandbox `Ready`/healthy,
+`claude login` + live prompt through the egress policy, `portainer.lab.lan` → 200).
+This was an idempotent re-run over the live host, not a clean snapshot-revert — the
+from-scratch rebuild stays unproven-but-low-risk, to be exercised at the real
+migration (see [todos.md](../current/todos.md)).
+
 ## Phase 3 — Dual auth: Max/Pro subscription ↔ Bedrock per project  ← START HERE
 
 Claude Code picks its backend per project via settings precedence (project `.claude/settings.json` overrides user `~/.claude/settings.json`). Subscription OAuth is the default; Bedrock is opt-in via env.

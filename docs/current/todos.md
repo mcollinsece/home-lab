@@ -15,8 +15,24 @@ Manual, sensitive, or interactive steps the bootstrap can't do. See
 
 ## Reproducibility / migration prep (server is not its forever home)
 - [x] **Pushed to GitHub** — branch `traefik-portainer-on-vm`.
-- [ ] **Test `setup-host.sh` reproducibility — snapshot-protected, on `.51` itself.**
-      Safe because the working snapshot is the escape hatch. Troubleshooting runbook:
+- [x] **`setup-host.sh` reproducibility — verified 2026-06-12 (idempotent re-run).**
+      Re-ran on `.51` and confirmed every check below (Node 22, OpenShell `v0.0.62`,
+      gateway + `podman.socket` active, `driver=podman`, bind `0.0.0.0:17670`,
+      `Connected`), plus the manual post-steps: `claude-code` sandbox `Ready`/healthy,
+      `claude login` + a live prompt through the egress policy, and `portainer.lab.lan`
+      → Traefik 200. The path snag hit on the way (relative `--policy` path) is now in
+      the runbook.
+
+      > **Caveat — what this did *not* prove:** this was an idempotent re-run over the
+      > already-built host, **not** the clean snapshot-revert test described below. The
+      > from-absolute-zero rebuild is therefore unproven (an ordering/dependency bug
+      > could hide behind pre-existing state). Judged acceptable for a transitional dev
+      > host: the repo + runbook — not a VM snapshot — are the durability guarantee, so
+      > the `working-openshell-claude` snapshot can be deleted. Run the clean-revert
+      > procedure below before/at the real migration to a new box.
+
+- [ ] **(Optional, for the real migration) Clean snapshot-revert reproducibility test.**
+      Safe because a working snapshot is the escape hatch. Troubleshooting runbook:
       [../../bootstrap/TROUBLESHOOTING.md](../../bootstrap/TROUBLESHOOTING.md).
 
       0. **Push everything to GitHub FIRST.** A revert wipes anything not on GitHub —
