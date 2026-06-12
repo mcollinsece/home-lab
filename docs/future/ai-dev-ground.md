@@ -11,7 +11,7 @@
 | Layer | What it is | Role in your setup |
 |---|---|---|
 | **OpenShell** ([repo](https://github.com/NVIDIA/OpenShell)) | Open-source sandbox runtime (Apache 2.0, alpha). Gateway + per-sandbox containers, deny-by-default YAML network/filesystem/process policies, credential providers, inference router. | The foundation. Runs Claude Code, Codex, OpenCode, Copilot **unmodified** — all four ship in the base sandbox image. |
-| **NemoClaw** ([repo](https://github.com/NVIDIA/NemoClaw), [docs](https://docs.nvidia.com/nemoclaw/latest/)) | One-command stack on top of OpenShell, for onboarding **OpenClaw** always-on agents with routed inference and hardened policy presets. Alpha. | Phase 5. Not how you run Claude Code — it's for the always-on OpenClaw assistant layer. |
+| **NemoClaw** ([repo](https://github.com/NVIDIA/NemoClaw), [docs](https://docs.nvidia.com/nemoclaw/latest/)) | One-command stack on top of OpenShell, for onboarding **OpenClaw**/**Hermes** always-on agents with routed inference and hardened policy presets. Alpha. | Phase 5 — **optional**. A convenience wrapper, not the agent; you can run OpenClaw directly on OpenShell (Path A) and skip it. Most valuable once you add local inference (GPU + vLLM). |
 | **NeMo Agent Toolkit** ([repo](https://github.com/NVIDIA/NeMo-Agent-Toolkit)) | Python library for connecting/orchestrating teams of agents across frameworks; MCP client/server and A2A support. | Phase 6. The orchestration brain that coordinates your sandboxed agents. |
 
 Key facts:
@@ -34,11 +34,17 @@ The current VM (4 vCPU / 15 GB / 108 GB) meets the minimum. Multi-agent use is b
 | RAM | 8 GB | 16–24 GB (each sandbox is a container; NemoClaw adds k3s + gateway) |
 | Disk | 20 GB | 60+ GB (sandbox images ~2.4 GB each, plus Docker layer cache) |
 
-Software: Docker Engine (docker-ce), Node.js 22.16+, npm 10+, git.
+Software: a container runtime (**rootless Podman** — already running this host's services) plus Node.js 22.16+, npm 10+, git.
 
-> NemoClaw's tested Linux path is Docker. On fresh docker-ce installs with the containerd image store enabled, `nemoclaw onboard` handles the fuse-overlayfs workaround automatically — no manual setup.
+### Runtime: Podman vs Docker
 
-Docker and Podman can coexist. Install Docker for OpenShell sandboxes while keeping rootless Podman for the existing Quadlet services (Traefik, Portainer, future projects).
+**OpenShell runs on Podman — you do not need Docker for Phases 2–4.** OpenShell's prerequisites list "Docker, Podman, or host virtualization (MicroVM)" as interchangeable backends, so the rootless Podman already running Traefik/Portainer covers the entire core of this plan.
+
+The only place Docker has an edge is **Phase 5's NemoClaw**, whose tested Linux path is Docker (on fresh docker-ce installs with the containerd image store enabled, `nemoclaw onboard` handles the fuse-overlayfs workaround automatically). But Phase 5 can stay on Podman by skipping NemoClaw and running OpenClaw directly as a BYOC sandbox — see [Phase 5](#phase-5--always-on-openclaw-assistant).
+
+**Decision: stay on Podman; do not install Docker now.** One runtime means one network model — agent sandboxes can share `ai-net` with Traefik/Portainer instead of straddling a Docker bridge and a separate Podman network. Revisit Docker only if/when you reach NemoClaw with local inference.
+
+> ⚠️ **Verify before relying on it:** OpenShell's docs say "Podman" but don't specify **rootless** Podman, which is how the existing services run. OpenShell's per-sandbox L7 network enforcement may want root or extra privileges. Confirm rootless Podman works for the sandbox compute driver during Phase 2; if it needs rootful Podman, that's still Podman (no Docker) but a different security posture.
 
 ---
 
@@ -69,7 +75,7 @@ Docker and Podman can coexist. Install Docker for OpenShell sandboxes while keep
 
 | Concern | Now (single VM) | Future (k8s / multi-node) |
 |---|---|---|
-| Agent sandboxes | OpenShell (Docker-based) | OpenShell on k8s nodes, policies → NetworkPolicy |
+| Agent sandboxes | OpenShell (Podman or Docker) | OpenShell on k8s nodes, policies → NetworkPolicy |
 | Supporting services | Podman **Quadlets** (`.container`, `.network`) | Deployments / Jobs / CronJobs |
 | Isolation & cleanup | one unit per project; `systemctl --user disable` | Namespace per project; `kubectl delete ns` |
 | Images | build locally → push to local registry `:5000` | same registry → cluster pulls from it |
@@ -91,8 +97,7 @@ home-lab/
 ├── .gitignore                      ✅ **/*.env, !*.env.example, *.key, age keys
 ├── docs/
 │   ├── current/
-│   │   ├── network-overview.md     ✅ hardware, IPs, running services, pending items
-│   │   └── homelab-review.md       ✅ history of the old Fedora setup
+│   │   └── platform.md             ✅ hardware, IPs, running services, pending items
 │   └── future/
 │       └── ai-dev-ground.md        ✅ this file — AI stack plan
 ├── networks/
@@ -117,11 +122,25 @@ home-lab/
 
 ## Phase 1 — VM base prep
 
+The host already runs **rootless Podman** for Traefik/Portainer, which is the runtime OpenShell will use (see [Runtime: Podman vs Docker](#runtime-podman-vs-docker)). So base prep is just system packages + Node 22 — **no Docker on the critical path.**
+
 ```bash
 # As root or with sudo on Debian
 apt update && apt upgrade -y
 apt install -y curl git ca-certificates gnupg
 
+# Node 22 LTS (NodeSource)
+curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+apt install -y nodejs
+node -v   # must be >= 22.16
+```
+
+Hygiene: SSH key-only auth; this VM holds live credentials, keep it off any exposed network segment.
+
+<details>
+<summary><b>Optional: Docker Engine — only if you later choose the NemoClaw path (Phase 5, Path B)</b></summary>
+
+```bash
 # Docker Engine (official repo — Debian's docker.io package is often stale)
 install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
@@ -131,14 +150,10 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.
   > /etc/apt/sources.list.d/docker.list
 apt update && apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 usermod -aG docker $USER   # log out/in after
-
-# Node 22 LTS (NodeSource)
-curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-apt install -y nodejs
-node -v   # must be >= 22.16
 ```
 
-Hygiene: SSH key-only auth; this VM holds live credentials, keep it off any exposed network segment.
+Docker and rootless Podman coexist fine. On fresh docker-ce installs with the containerd image store enabled, `nemoclaw onboard` handles the fuse-overlayfs workaround automatically.
+</details>
 
 ## Phase 2 — OpenShell + first Claude Code sandbox  ← START HERE
 
@@ -201,10 +216,51 @@ Switching = `cd` into a project; no re-auth, no sandbox rebuild.
 
 One sandbox per agent keeps policies and credentials cleanly scoped.
 
-## Phase 5 — NemoClaw (always-on OpenClaw agent)
+## Phase 5 — Always-on OpenClaw assistant
+
+The goal of this phase is an always-on assistant agent in a hardened sandbox. There are two ways to get there. **NemoClaw is a wrapper, not the agent** — [OpenClaw](https://github.com/openclaw/openclaw) and Hermes are standalone open-source agents; NemoClaw just bundles guided onboarding, an inference router, hardened policy presets, and lifecycle CLI around them, and pulls Nemotron models.
+
+What NemoClaw adds, weighed against this no-GPU/remote-API setup:
+
+| NemoClaw feature | Needed here? |
+|---|---|
+| Onboarding wizard | No — write a BYOC Containerfile + policy YAML, same as Gemini in Phase 4 |
+| Inference router (`inference.local`) | **No** — its real win is routing to *local* vLLM/Nemotron; you're remote-APIs-only, and OpenShell providers already inject `ANTHROPIC_API_KEY`/Bedrock creds |
+| Hardened policy presets | No — reuse/tighten the policy you wrote for Claude Code |
+| Lifecycle CLI | No — `openshell sandbox` commands, same as the other agents |
+| Nemotron models | Irrelevant — remote APIs |
+
+Because NemoClaw's value concentrates in the local-inference case you're deliberately skipping for now, **Path A is recommended** until you add GPU + vLLM in the k3s phase.
+
+### Path A — Direct OpenClaw via BYOC (recommended; stays on Podman)
+
+Run OpenClaw as just another OpenShell BYOC sandbox — same pattern as Gemini in Phase 4. No Docker, no NemoClaw.
+
+1. BYOC Containerfile based on the OpenShell sandbox image, adding OpenClaw:
+   ```dockerfile
+   # OpenClaw — standalone always-on assistant (github.com/openclaw/openclaw)
+   RUN curl -fsSL https://openclaw.ai/install.sh | bash -s -- --install-method git --version main
+   ```
+2. Run it always-on (OpenClaw ships a daemon mode):
+   ```bash
+   openshell sandbox create --from ./openclaw-sandbox -- openclaw onboard --install-daemon
+   ```
+3. **Inference:** point OpenClaw straight at the API via the OpenShell provider that already injects `ANTHROPIC_API_KEY` (or Bedrock creds) — no router needed.
+4. **Policy:** reuse and tighten the network policy from Claude Code; OpenShell's `generate-sandbox-policy` skill drafts it from plain English.
+5. **Dashboard/TUI:** expose via SSH tunnel, or put the sandbox on `ai-net` for Traefik at `openclaw.lab.lan`.
+
+**Why this path:** every agent (Claude Code, Codex, Gemini, OpenClaw) becomes "just another OpenShell sandbox" — one runtime, one lifecycle, one policy mechanism, no alpha-on-alpha NemoClaw layer. You trade NemoClaw's one-command onboarding and managed router (≈80% of the polish) for manual BYOC wiring.
+
+**Verify during prototyping:** OpenShell sandboxes are built around agent *sessions*; confirm OpenClaw's daemon persists and stays reachable as a long-running process inside one.
+
+> Hermes (Nous Research) is the other supported agent, but it's a self-evolving *research* agent rather than an always-on assistant, and its easy path ([`hermesclaw`](https://github.com/TheAiSingularity/hermesclaw)) hard-requires Docker — reintroducing the dependency you're avoiding. For an always-on assistant on Podman, prefer OpenClaw. A `hermes-open-sandbox` pip backend exists if you want Hermes specifically.
+
+### Path B — NemoClaw (one-command, but Docker-tested)
+
+Use this only for the managed onboarding/router — most worthwhile once you add **local inference** (GPU + vLLM/Nemotron) in the k3s phase. Requires the optional Docker install from [Phase 1](#phase-1--vm-base-prep).
 
 ```bash
-curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash   # runs `nemoclaw onboard` wizard
+curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash   # runs `nemoclaw onboard` wizard; verify URL against current NemoClaw docs
 ```
 
 - Wizard prompts: sandbox name → inference provider → network policy preset.
@@ -308,7 +364,7 @@ When you add a second/third Optiplex:
 
 ## Order of operations
 
-**Pre-work (see [current state](../current/network-overview.md#pending) for detail):**
+**Pre-work (see [current state](../current/platform.md#pending) for detail):**
 
 - [ ] AdGuard wildcard `*.lab.lan → 192.168.0.51`
 - [ ] Podman secrets: `anthropic_api_key`, AWS Bedrock creds
@@ -316,11 +372,11 @@ When you add a second/third Optiplex:
 
 **Phases:**
 
-1. [ ] Phase 1: Docker Engine + Node 22
+1. [ ] Phase 1: Node 22 (Podman already present; Docker optional, NemoClaw-only)
 2. [ ] Phase 2: OpenShell + Claude Code sandbox ← **initial setup goal**
 3. [ ] Phase 3: Subscription + Bedrock providers, per-project switching
 4. [ ] Phase 4: Codex sandbox; Gemini CLI BYOC sandbox
-5. [ ] Phase 5: NemoClaw + OpenClaw assistant
+5. [ ] Phase 5: Always-on OpenClaw assistant (Path A: direct BYOC on Podman; Path B: NemoClaw on Docker)
 6. [ ] Phase 6: NeMo Agent Toolkit orchestration layer
 
 ---
@@ -340,4 +396,5 @@ When you add a second/third Optiplex:
 - [NVIDIA OpenShell repo](https://github.com/NVIDIA/OpenShell) · [OpenShell blog announcement](https://developer.nvidia.com/blog/run-autonomous-self-evolving-agents-more-safely-with-nvidia-openshell/)
 - [NemoClaw repo](https://github.com/NVIDIA/NemoClaw) · [prerequisites](https://docs.nvidia.com/nemoclaw/latest/get-started/prerequisites.html), [quickstart](https://docs.nvidia.com/nemoclaw/latest/get-started/quickstart.html), [inference options](https://docs.nvidia.com/nemoclaw/latest/inference/inference-options.html)
 - [NeMo Agent Toolkit repo](https://github.com/NVIDIA/NeMo-Agent-Toolkit)
+- [OpenClaw repo](https://github.com/openclaw/openclaw) · [OpenClaw install docs](https://docs.openclaw.ai/install) · [hermesclaw (Hermes-in-OpenShell)](https://github.com/TheAiSingularity/hermesclaw)
 - [Claude Code on Amazon Bedrock](https://code.claude.com/docs/en/amazon-bedrock)
