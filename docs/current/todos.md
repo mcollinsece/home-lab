@@ -15,35 +15,40 @@ Manual, sensitive, or interactive steps the bootstrap can't do. See
 
 ## Reproducibility / migration prep (server is not its forever home)
 - [x] **Pushed to GitHub** — branch `traefik-portainer-on-vm`.
-- [ ] **Test `setup-host.sh` reproducibility — on a THROWAWAY, not `.51`.**
-      Do NOT reset the live VM: it holds the working OpenShell + authenticated
-      `claude-code` sandbox; reproducing by destroying it is backwards. Use a
-      Proxmox full-clone of this VM, or a fresh Debian 13 VM.
+- [ ] **Test `setup-host.sh` reproducibility — snapshot-protected, on `.51` itself.**
+      Safe because the working snapshot is the escape hatch. Troubleshooting runbook:
+      [../../bootstrap/TROUBLESHOOTING.md](../../bootstrap/TROUBLESHOOTING.md).
 
-      1. Provision the throwaway (user `debian`, uid 1000, sudo). If it's a clone,
-         change **hostname + IP + MAC** so it doesn't collide with `.51` on the LAN.
-      2. `git clone <repo> ~/home-lab && ~/home-lab/bootstrap/setup-host.sh`
-      3. Verify the script's work:
+      0. **Push everything to GitHub FIRST.** A revert wipes anything not on GitHub —
+         including Claude's local memory under `~/.claude/`. The repo (incl.
+         TROUBLESHOOTING.md) is the only thing that survives, so confirm
+         `git status` is clean and pushed before going further.
+      1. **Snapshot the working state now** (Proxmox → snapshot, e.g. `working-openshell-claude`).
+         This is the rollback target if the test goes badly.
+      2. **Revert to the pre-setup snapshot** (clean Debian + Traefik/Portainer, before
+         today's AI build). If no such snapshot exists, this approach can't give a truly
+         clean test — fall back to a fresh VM, or just re-run bootstrap over the current
+         host (idempotent, but proves less).
+      3. `git clone <repo> ~/home-lab && ~/home-lab/bootstrap/setup-host.sh`
+      4. Verify the script's work:
          - `node -v` (≥22), `openshell --version` (= 0.0.62)
          - `systemctl --user is-active openshell-gateway podman.socket`
-         - gateway log: `journalctl --user -u openshell-gateway | grep 'compute driver'`
-           → `driver=podman`
+         - `journalctl --user -u openshell-gateway | grep 'compute driver'` → `driver=podman`
+         - `ss -tlnp | grep 17670` → `0.0.0.0:17670` (the #1 gotcha — see runbook)
          - `openshell status` → Connected
-      4. Verify the manual post-steps the script does NOT do (by design):
+      5. Manual post-steps the script does NOT do (expected — see runbook):
          - quadlets: `systemctl --user start traefik portainer && podman ps`
+           (Portainer admin account resets — its data is a Podman volume, not git)
          - sandbox: `openshell sandbox create --name claude-code --no-auto-providers \
-             --policy ~/home-lab/openshell/policies/claude-code.yaml -- claude`
-           then `claude login` (interactive OAuth)
-         - AdGuard `*.lab.lan` wildcard (lives on the AdGuard LXC, off-host)
-         - Podman secrets (none yet; Phase 3)
-      5. Confirm OpenShell mTLS re-pairs cleanly on the fresh install (certs are
-         regenerated under `~/.local/state/openshell/tls/`, so they are NOT
-         committed — a rebuild should just work).
-      6. Tear down the throwaway.
+             --policy ~/home-lab/openshell/policies/claude-code.yaml -- claude` then `claude login`
+         - AdGuard wildcard (off-host) and Podman secrets (none yet) — unaffected
+      6. **If it fails:** troubleshoot with TROUBLESHOOTING.md; if badly, revert to the
+         `working-openshell-claude` snapshot from step 1.
+      7. On success, note any fixes needed and fold them back into `setup-host.sh`.
 
-      > If steps 4's quadlet-start or sandbox-create feel like they *should* be in
-      > the script: say so and I'll fold `systemctl --user start traefik portainer`
-      > (and optionally the sandbox create) into `setup-host.sh`.
+      > If steps 5's quadlet-start / sandbox-create should be automated, say so and I'll
+      > fold `systemctl --user start traefik portainer` (and optionally the sandbox
+      > create) into `setup-host.sh` to make the rebuild closer to one-shot.
 - [ ] **Podman secrets are not in git by design** — document/script how to re-create
       them on a new host (`anthropic_api_key`, AWS Bedrock creds) from my password manager.
 

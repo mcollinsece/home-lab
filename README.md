@@ -53,7 +53,8 @@ git clone <repo> ~/home-lab && ~/home-lab/bootstrap/setup-host.sh
 
 [`bootstrap/setup-host.sh`](bootstrap/setup-host.sh) is idempotent: base packages,
 Node 22, linger, Podman socket, Quadlet symlinks, OpenShell, and the git-managed
-`gateway.env`. Sensitive/interactive bits stay in [todos.md](docs/current/todos.md).
+`gateway.env`. Sensitive/interactive bits stay in [todos.md](docs/current/todos.md);
+when a rebuild misbehaves, see [bootstrap/TROUBLESHOOTING.md](bootstrap/TROUBLESHOOTING.md).
 
 ## Adding a new service
 

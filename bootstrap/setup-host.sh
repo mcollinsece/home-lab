@@ -87,7 +87,8 @@ if journalctl --user -u openshell-gateway --since "30 seconds ago" --no-pager 2>
      | grep -q 'compute driver driver=podman'; then
   echo "gateway up on Podman driver"
 else
-  echo "WARNING: gateway did not report the Podman driver — check 'journalctl --user -u openshell-gateway'" >&2
+  echo "WARNING: gateway did not report the Podman driver. See bootstrap/TROUBLESHOOTING.md" >&2
+  echo "         (check: ss -tlnp | grep 17670  should be 0.0.0.0:17670, not 127.0.0.1)" >&2
 fi
 
 say "Done. Next (see docs/current/todos.md):"
