@@ -23,11 +23,23 @@ All `*.lab.lan` names resolve via AdGuard's wildcard rewrite (`*.lab.lan → 192
 
 ## Documentation
 
+**Current state**
+
 | Doc | What it covers |
 |---|---|
-| [docs/network-overview.md](docs/network-overview.md) | Hardware specs, IP assignments, service roles |
-| [ai-dev-ground.md](ai-dev-ground.md) | AI agent stack setup plan, current VM state, Quadlet patterns, k8s path |
-| [docs/homelab-review.md](docs/homelab-review.md) | History of the old Fedora setup + rebuild recommendations |
+| [docs/current/network-overview.md](docs/current/network-overview.md) | Hardware, IPs, running services, pending items — single source of truth |
+| [docs/current/homelab-review.md](docs/current/homelab-review.md) | History of the old Fedora setup and why we rebuilt |
+
+**Future plans**
+
+| Doc | What it covers |
+|---|---|
+| [docs/future/ai-dev-ground.md](docs/future/ai-dev-ground.md) | AI agent stack (OpenShell, NemoClaw, NeMo), Quadlet patterns, k8s roadmap |
+
+**Config**
+
+| Doc | What it covers |
+|---|---|
 | [traefik/README.md](traefik/README.md) | How to expose a service via Traefik labels |
 
 ## Adding a new service
@@ -39,7 +51,7 @@ All `*.lab.lan` names resolve via AdGuard's wildcard rewrite (`*.lab.lan → 192
 5. Link the Quadlet: `ln -s $(pwd)/projects/<name>/<name>.container ~/.config/containers/systemd/`
 6. `systemctl --user daemon-reload && systemctl --user start <name>`
 
-See [ai-dev-ground.md](ai-dev-ground.md#non-agent-services-quadlet-pattern) for the full pattern including revision and teardown.
+See [docs/future/ai-dev-ground.md](docs/future/ai-dev-ground.md#non-agent-services-quadlet-pattern) for the full pattern including revision and teardown.
 
 ## Secrets
 
