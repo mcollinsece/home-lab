@@ -3,7 +3,6 @@
 **Target:** Debian VM running NVIDIA OpenShell + NemoClaw + NeMo Agent Toolkit, hosting sandboxed coding agents (Claude Code first, then Codex and Gemini CLI) with per-project switching between Claude Max/Pro subscription and Bedrock.
 
 > **Current infrastructure state:** [../current/network-overview.md](../current/network-overview.md) — hardware, IPs, running services, pending items
-> **History:** [../current/homelab-review.md](../current/homelab-review.md) — old Fedora setup and lessons learned
 
 ---
 

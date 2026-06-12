@@ -28,7 +28,6 @@ All `*.lab.lan` names resolve via AdGuard's wildcard rewrite (`*.lab.lan → 192
 | Doc | What it covers |
 |---|---|
 | [docs/current/network-overview.md](docs/current/network-overview.md) | Hardware, IPs, running services, pending items — single source of truth |
-| [docs/current/homelab-review.md](docs/current/homelab-review.md) | History of the old Fedora setup and why we rebuilt |
 
 **Future plans**
 

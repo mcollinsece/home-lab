@@ -1,6 +1,5 @@
 # Current Infrastructure State
 
-> **History & context:** [homelab-review.md](homelab-review.md) — what the old setup was and why we rebuilt
 > **Future plans:** [../future/ai-dev-ground.md](../future/ai-dev-ground.md) — AI agent stack, phases, k8s roadmap
 
 ---
