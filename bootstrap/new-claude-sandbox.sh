@@ -3,19 +3,23 @@
 # new-claude-sandbox.sh — spin up an auth-ready Claude Code OpenShell sandbox
 #
 # Usage:
-#   new-claude-sandbox.sh <name> [--bedrock] [--claudeai | --clone <src-sandbox>]
+#   new-claude-sandbox.sh <name> [--bedrock] [--claudeai | --clone <src-sandbox>] [--headless]
 #
 # Flags (composable — combine freely):
 #   --bedrock              inject Bedrock keys from ~/home-lab/.secrets/bedrock.env
 #   --claudeai             clone Claude.ai token from host ~/.claude/.credentials.json
 #   --clone <src>          clone token from a running OpenShell sandbox (agent-agnostic)
+#   --headless             create sandbox ready for task dispatch, no TUI attach.
+#                          Use for autonomous agents; dispatch tasks with:
+#                            openshell sandbox exec -n <name> -- claude -p "your task"
 #
 # Examples:
 #   new-claude-sandbox.sh worker-1 --bedrock
 #   new-claude-sandbox.sh worker-1 --claudeai
 #   new-claude-sandbox.sh worker-1 --clone claude-code
 #   new-claude-sandbox.sh worker-1 --bedrock --claudeai
-#   new-claude-sandbox.sh worker-1 --bedrock --clone claude-code
+#   new-claude-sandbox.sh worker-1 --claudeai --headless          # autonomous worker
+#   new-claude-sandbox.sh worker-1 --bedrock --claudeai --headless
 #
 # See docs/current/todos.md for design notes (director/worker pattern, auth modes).
 set -euo pipefail
@@ -60,6 +64,7 @@ USE_BEDROCK=false
 USE_CLAUDEAI=false
 USE_CLONE=false
 CLONE_SRC=""
+HEADLESS=false
 
 usage() {
   grep '^#' "$0" | grep -v '^#!/' | sed 's/^# \?//'
@@ -68,8 +73,9 @@ usage() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --bedrock)  USE_BEDROCK=true; shift ;;
-    --claudeai) USE_CLAUDEAI=true; shift ;;
+    --bedrock)   USE_BEDROCK=true; shift ;;
+    --claudeai)  USE_CLAUDEAI=true; shift ;;
+    --headless)  HEADLESS=true; shift ;;
     --clone)
       [[ $# -gt 1 ]] || die "--clone requires a source sandbox name"
       USE_CLONE=true; CLONE_SRC="$2"; shift 2 ;;
@@ -82,7 +88,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$SANDBOX_NAME" ]] \
-  || die "Usage: new-claude-sandbox.sh <name> [--bedrock] [--claudeai | --clone <src>]"
+  || die "Usage: new-claude-sandbox.sh <name> [--bedrock] [--claudeai | --clone <src>] [--headless]"
 ( $USE_CLAUDEAI && $USE_CLONE ) \
   && die "--claudeai and --clone are mutually exclusive (both clone auth; pick one)"
 
@@ -223,40 +229,62 @@ if $USE_BEDROCK && [[ -f "$BEDROCK_PROJECT_SETTINGS" ]]; then
 fi
 
 if [[ ${#UPLOAD_FLAGS[@]} -gt 0 ]]; then
-  # join setup commands with '; ' then append 'exec claude'
-  SETUP_SCRIPT="$(printf '%s; ' "${SETUP_CMDS[@]}")exec claude"
+  if $HEADLESS; then
+    SETUP_SCRIPT="$(printf '%s; ' "${SETUP_CMDS[@]}")exit 0"
+  else
+    SETUP_SCRIPT="$(printf '%s; ' "${SETUP_CMDS[@]}")exec claude"
+  fi
   ENTRYPOINT=(-- sh -c "$SETUP_SCRIPT")
 else
-  ENTRYPOINT=(-- claude)
+  if $HEADLESS; then
+    ENTRYPOINT=(-- sh -c "exit 0")
+  else
+    ENTRYPOINT=(-- claude)
+  fi
 fi
 
-# ---- create (blocks — claude runs interactively; files pre-staged via --upload)
+# Build optional --no-tty flag for headless (no PTY needed for a background worker)
+TTY_FLAG=()
+$HEADLESS && TTY_FLAG=(--no-tty)
+
+# ---- create -------------------------------------------------------------------
+# Interactive: blocks while claude TUI runs; files pre-staged via --upload.
+# Headless: setup script exits immediately; sandbox init stays alive for exec dispatch.
 openshell sandbox create \
   --name "$SANDBOX_NAME" \
   --no-auto-providers \
   --policy "$POLICY" \
+  ${TTY_FLAG[@]+"${TTY_FLAG[@]}"} \
   ${ENV_FLAGS[@]+"${ENV_FLAGS[@]}"} \
   ${UPLOAD_FLAGS[@]+"${UPLOAD_FLAGS[@]}"} \
   "${ENTRYPOINT[@]}"
 
-# ---- summary (prints after user exits claude) ---------------------------------
+# ---- summary ------------------------------------------------------------------
 AUTH_MODES=()
 $USE_BEDROCK  && AUTH_MODES+=("Bedrock (keys injected via --env)")
 $USE_CLAUDEAI && AUTH_MODES+=("Claude.ai (token from host director)")
 $USE_CLONE    && AUTH_MODES+=("Subscription (token cloned from '$CLONE_SRC')")
 [[ ${#AUTH_MODES[@]} -eq 0 ]] && AUTH_MODES+=("none — run 'claude login' inside the sandbox")
 
-printf '\n\033[1;32m=== Session ended — sandbox still running ===\033[0m\n'
-printf '  Name:   %s\n' "$SANDBOX_NAME"
-printf '  Auth:   %s\n' "${AUTH_MODES[*]}"
-printf '\n  Reconnect: openshell sandbox connect %s\n' "$SANDBOX_NAME"
+if $HEADLESS; then
+  printf '\n\033[1;32m=== Sandbox ready (headless) ===\033[0m\n'
+  printf '  Name: %s\n' "$SANDBOX_NAME"
+  printf '  Auth: %s\n' "${AUTH_MODES[*]}"
+  printf '\n  Dispatch: openshell sandbox exec -n %s -- claude -p "your task"\n' "$SANDBOX_NAME"
+  printf '  Connect:  openshell sandbox connect %s\n' "$SANDBOX_NAME"
+else
+  printf '\n\033[1;32m=== Session ended — sandbox still running ===\033[0m\n'
+  printf '  Name:   %s\n' "$SANDBOX_NAME"
+  printf '  Auth:   %s\n' "${AUTH_MODES[*]}"
+  printf '\n  Reconnect: openshell sandbox connect %s\n' "$SANDBOX_NAME"
 
-if ! $USE_CLAUDEAI && ! $USE_CLONE; then
-  printf '\n  \033[1;33mNote:\033[0m Run inside the sandbox: claude login\n'
-  printf '  (OAuth cannot be scripted — one interactive step per fresh sandbox)\n'
-fi
+  if ! $USE_CLAUDEAI && ! $USE_CLONE; then
+    printf '\n  \033[1;33mNote:\033[0m Run inside the sandbox: claude login\n'
+    printf '  (OAuth cannot be scripted — one interactive step per fresh sandbox)\n'
+  fi
 
-if $USE_BEDROCK && [[ -f "$BEDROCK_PROJECT_SETTINGS" ]]; then
-  printf '\n  Bedrock test: cd /sandbox/bedrock-test && claude -p "say bedrock-ok"\n'
+  if $USE_BEDROCK && [[ -f "$BEDROCK_PROJECT_SETTINGS" ]]; then
+    printf '\n  Bedrock test: cd /sandbox/bedrock-test && claude -p "say bedrock-ok"\n'
+  fi
 fi
 printf '\n'
