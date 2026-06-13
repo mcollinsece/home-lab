@@ -141,6 +141,15 @@ if $USE_CLONE; then
   ok "Source sandbox '$CLONE_SRC' found"
 fi
 
+# ---- idempotency: skip create if sandbox already exists -------------------
+if openshell sandbox list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$SANDBOX_NAME"; then
+  printf '\n\033[1;33m==>\033[0m Sandbox "%s" already exists — nothing to do\n' "$SANDBOX_NAME"
+  printf '  Connect:  openshell sandbox connect %s\n' "$SANDBOX_NAME"
+  printf '  Dispatch: openshell sandbox exec -n %s -- %s -p "task"\n' "$SANDBOX_NAME" "$AGENT_CMD"
+  printf '  Recreate: openshell sandbox delete -n %s && osbox %s ...\n\n' "$SANDBOX_NAME" "$SANDBOX_NAME"
+  exit 0
+fi
+
 # ---- read credentials now (before create — fail fast) -------------------------
 if $USE_CLAUDEAI; then
   say "Reading Claude.ai state from host director"

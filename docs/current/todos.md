@@ -5,47 +5,50 @@ See [platform.md](platform.md) for current state and
 
 ## Phase 4 — OpenClaw + secrets management
 
-OpenClaw is a Claude Code variant built for persistent, always-on assistant use.
-The design principle: **OpenShell is the single control plane for all agents.**
-OpenClaw runs as an OpenShell BYOC sandbox — not a raw Podman container — so it
-gets the same policy enforcement, exec dispatch, and lifecycle management as every
-other agent. Quadlet handles one narrow job: calling `osbox` on boot so the sandbox
-exists after a reboot.
+OpenClaw is an AI agent orchestration platform (not a CLI tool). It sits *above*
+OpenShell: it calls `openshell sandbox create` internally to spawn worker sandboxes,
+manages their lifecycle, dispatches tasks, and aggregates results. The native
+integration is documented at docs.openclaw.ai/gateway/openshell.
 
 **Architecture:**
-- `osbox openclaw --claudeai --headless` creates a headless sandbox from the OpenClaw
-  BYOC image. The Podman container persists after the setup script exits; the sandbox
-  stays `Ready` for `openshell sandbox exec` dispatch.
-- A systemd unit (`openclaw-start.service`, `Type=oneshot`) runs `osbox` idempotently
-  at boot — skip creation if the sandbox is already registered. Reboots covered;
-  OpenShell stays the authoritative registry.
-- `osbox` needs a `--if-not-exists` guard (or name-collision detection) so the boot
-  service is safe to run repeatedly without error.
+```
+OpenClaw (Quadlet — always-on director)
+   └── OpenShell gateway  ← OpenClaw configures this as its sandbox backend
+         ├── claude-code sandbox  (worker — osbox --claudeai)
+         ├── codex sandbox        (worker — osbox --codex, Phase 5)
+         └── gemini sandbox       (worker — osbox --gemini, Phase 6)
+```
 
-**Secrets manager** — replaces the manual `.secrets/` file pattern with something
-that survives a clean rebuild without manual copy-paste from a password manager:
-- Evaluate **Podman secrets** (`podman secret create`) — already available, integrates
-  with Quadlet via `Secret=` in container units. Simple; no extra tooling.
-- Evaluate **SOPS + age** — encrypt secrets in git, decrypt with a key from the
-  password manager. Survives a repo clone; `.age` extension already gitignored.
-- Decision drives how `osbox --bedrock`, `--codex`, `--gemini` source keys going
-  forward. Pick one and migrate `~/.secrets/bedrock.env` to it.
+OpenClaw runs as a Podman Quadlet because it's the orchestration layer — not a worker
+to be isolated. OpenShell remains the control plane for all agent sandboxes. Running
+OpenClaw inside OpenShell would prevent it from using OpenShell as its backend.
+For k8s migration: OpenClaw Quadlet → k8s Deployment; OpenShell sandboxes → k8s Pods.
 
-**Work items:**
-- [ ] **Local image registry** — `registry/registry.container` Quadlet + Traefik route
-      at `registry.lab.lan`. Required before pulling or building BYOC images.
-- [ ] **OpenClaw BYOC image** — pull/build and push to local registry (`:5000`).
-      Define `openshell/policies/openclaw.yaml` (egress scope TBD from OpenClaw docs).
-- [ ] **`osbox` idempotency** — add name-collision detection: if sandbox already exists,
-      print status and exit 0. Makes the boot service safe to repeat.
-- [ ] **`openclaw-start.service`** systemd unit — `Type=oneshot`, calls
-      `osbox openclaw --claudeai --headless`; wired to `openshell-gateway.service`
-      via `After=`/`Wants=` so it fires once the gateway is up.
-- [ ] **Secrets manager** — pick Podman secrets vs SOPS+age; migrate `bedrock.env`;
-      document re-creation procedure for a clean-host rebuild (replaces the manual
-      `.secrets/` step that currently requires a password manager copy-paste).
-- [ ] **Verify** sandbox survives a gateway restart and a full reboot; confirm
-      `openshell sandbox exec -n openclaw -- openclaw -p "task"` dispatches correctly.
+**Phase 4 status:**
+- [x] **Local image registry** — `registry/registry.container` Quadlet running at
+      `registry.lab.lan`. Push: `podman push --tls-verify=false registry.lab.lan/<image>:<tag>`.
+- [x] **`osbox` idempotency** — name-collision detection added; exits cleanly if the
+      sandbox already exists, prints connect/dispatch/recreate instructions.
+- [x] **Secrets manager** — `bootstrap/init-secrets.sh` (PATH-installed as `init-secrets`):
+      populates `.secrets/bedrock.env` (for osbox) and Podman secrets
+      `bedrock_aws_*` + `anthropic_api_key` (for Quadlet containers).
+- [x] **`openclaw/openclaw.container`** Quadlet scaffolding — web UI at `openclaw.lab.lan`,
+      state volume, `anthropic_api_key` Podman secret, `openshell-gateway.service` dep.
+      Browser automation (`SYS_ADMIN` + `--shm-size=1g`) is commented out; enable when needed.
+- [x] **`openclaw/Containerfile`** — extends upstream image with openshell CLI pre-installed
+      and gateway pointed at `host.containers.internal:17670`. Build + push to local registry
+      when ready to wire up OpenShell backend from inside OpenClaw.
+
+**Remaining manual steps:**
+- [ ] **`init-secrets`** — run once to create Bedrock + Anthropic API key Podman secrets.
+- [ ] **`cp openclaw/openclaw.env.example openclaw/openclaw.env`** — fill in gateway URL.
+- [ ] **`systemctl --user start openclaw`** — start the OpenClaw Quadlet.
+- [ ] **OpenClaw gateway config** — in OpenClaw UI (http://openclaw.lab.lan):
+      Settings → Gateway → OpenShell → URL: `http://host.containers.internal:17670`.
+- [ ] **Custom image** — `podman build -t registry.lab.lan/openclaw:latest openclaw/ &&
+      podman push --tls-verify=false registry.lab.lan/openclaw:latest`, then switch
+      `openclaw.container` Image= to `registry.lab.lan/openclaw:latest`. This bakes in
+      the openshell CLI so OpenClaw can spawn sandboxes directly.
 
 ## Phase 5 — Codex sandbox
 
@@ -53,10 +56,9 @@ Add OpenAI Codex CLI as a first-class `osbox`-managed agent.
 
 - [ ] **`openshell/policies/codex.yaml`** — egress policy for OpenAI API endpoints.
 - [ ] **`--codex` flag for `osbox`** — sets `AGENT_CMD=codex`, sources `OPENAI_API_KEY`
-      via the secrets manager chosen in Phase 4, clones `~/.codex/` state if present.
-      The `AGENT_CMD` hook is already wired — this is mostly a credential + policy block.
-- [ ] **`openshell/project-settings/codex-test.json`** — committed non-secret opt-in
-      settings (mirrors `bedrock-test.json` pattern).
+      via `init-secrets` (adds to `.secrets/codex.env` + Podman secret), clones
+      `~/.codex/` state if present. The `AGENT_CMD` hook is already wired.
+- [ ] **`openshell/project-settings/codex-test.json`** — non-secret opt-in settings.
 - [ ] **Verify** `osbox codex-1 --codex --headless` → dispatch
       `openshell sandbox exec -n codex-1 -- codex -p "task"`.
 
@@ -66,7 +68,7 @@ Add Google Gemini CLI as a sandboxed agent via the same `osbox` pattern.
 
 - [ ] **`openshell/policies/gemini.yaml`** — egress for Gemini API / GCP endpoints.
 - [ ] **`--gemini` flag for `osbox`** — sets `AGENT_CMD=gemini`, injects GCP
-      application-default credentials or `GOOGLE_API_KEY` via secrets manager.
+      application-default credentials or `GOOGLE_API_KEY` via `init-secrets`.
 - [ ] **`openshell/project-settings/gemini-test.json`**.
 - [ ] **Verify** `osbox gemini-1 --gemini --headless` → dispatch
       `openshell sandbox exec -n gemini-1 -- gemini -p "task"`.

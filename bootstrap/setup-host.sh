@@ -12,7 +12,9 @@
 #   - AdGuard *.lab.lan wildcard (lives on the AdGuard LXC, not this host)
 #   - Podman secrets / API credentials
 #   - `claude login` (interactive OAuth)
-#   - the local image registry (registry/ — not built yet)
+#   - bootstrap/init-secrets.sh  (Podman secrets + .secrets/bedrock.env)
+#   - cp openclaw/openclaw.env.example openclaw/openclaw.env
+#   - `claude login` (interactive OAuth — cannot be scripted)
 set -euo pipefail
 
 # ---- config ---------------------------------------------------------------
@@ -65,6 +67,7 @@ while IFS= read -r unit; do
   ln -sfn "$unit" "$SYSTEMD_USER_DIR/$(basename "$unit")"
   echo "linked $(basename "$unit")"
 done < <(find "$REPO_DIR"/networks "$REPO_DIR"/traefik "$REPO_DIR"/portainer \
+              "$REPO_DIR"/registry "$REPO_DIR"/openclaw \
               -name '*.network' -o -name '*.container' -o -name '*.volume' 2>/dev/null)
 systemctl --user daemon-reload
 
@@ -91,17 +94,42 @@ else
   echo "         (check: ss -tlnp | grep 17670  should be 0.0.0.0:17670, not 127.0.0.1)" >&2
 fi
 
-# ---- 7. CLI tools (osbox — PATH-resident sandbox helper) -----------------
+# ---- 7. Podman registries config (trust registry.lab.lan as insecure HTTP) ---
+say "Podman registries config"
+mkdir -p "$HOME/.config/containers"
+REGS_CONF="$HOME/.config/containers/registries.conf"
+if ! grep -q 'registry.lab.lan' "$REGS_CONF" 2>/dev/null; then
+  cat >> "$REGS_CONF" <<'REGSEOF'
+
+[[registry]]
+location = "registry.lab.lan"
+insecure = true
+REGSEOF
+  echo "added registry.lab.lan insecure registry"
+else
+  echo "registry.lab.lan already configured"
+fi
+
+# ---- 8. CLI tools (osbox, init-secrets — PATH-resident helpers) -----------
 say "CLI tools -> ~/.local/bin"
 mkdir -p "$HOME/.local/bin"
-chmod +x "$REPO_DIR/bootstrap/osbox"
-ln -sfn "$REPO_DIR/bootstrap/osbox" "$HOME/.local/bin/osbox"
-echo "osbox -> $HOME/.local/bin/osbox"
+chmod +x "$REPO_DIR/bootstrap/osbox" "$REPO_DIR/bootstrap/init-secrets.sh"
+ln -sfn "$REPO_DIR/bootstrap/osbox"          "$HOME/.local/bin/osbox"
+ln -sfn "$REPO_DIR/bootstrap/init-secrets.sh" "$HOME/.local/bin/init-secrets"
+echo "osbox         -> $HOME/.local/bin/osbox"
+echo "init-secrets  -> $HOME/.local/bin/init-secrets"
 
 say "Done. Next (see docs/current/todos.md):"
 cat <<'EOF'
-  - openshell sandbox create --name claude-code --no-auto-providers \
-        --policy openshell/policies/claude-code.yaml -- claude   # then `claude login`
-  - Start Quadlet services if not running:
-        systemctl --user start traefik.service portainer.service
+  Manual steps (cannot be scripted):
+    init-secrets                          # Bedrock keys + Anthropic API key -> Podman secrets
+    cp openclaw/openclaw.env.example openclaw/openclaw.env  # fill in gateway URL
+    claude login                          # interactive OAuth for Claude Code sandboxes
+
+  Start services:
+    systemctl --user start traefik portainer registry openclaw
+
+  First Claude Code sandbox (if not already created):
+    openshell sandbox create --name claude-code --no-auto-providers \
+        --policy openshell/policies/claude-code.yaml -- claude
 EOF

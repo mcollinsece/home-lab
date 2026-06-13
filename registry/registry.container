@@ -1,0 +1,29 @@
+# Docker Registry v2 — local container image store for BYOC and project images.
+# Quadlet unit (systemd --user). Symlinked into ~/.config/containers/systemd/.
+#
+# Push:  podman push --tls-verify=false registry.lab.lan/<image>:<tag>
+# Pull:  podman pull --tls-verify=false registry.lab.lan/<image>:<tag>
+# UI:    http://registry.lab.lan  (raw v2 API; /v2/_catalog lists repos)
+#
+# Marked insecure in ~/.config/containers/registries.conf by setup-host.sh
+# so --tls-verify=false is only needed for the initial push, not for Quadlet pulls.
+[Unit]
+Description=Docker Registry v2 — local container image store
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+ContainerName=registry
+Image=docker.io/registry:2
+Network=ai-net.network
+Volume=registry-data.volume:/var/lib/registry
+# Traefik: name-derived route -> registry.lab.lan
+# Port must be declared: registry listens on 5000, not 80.
+Label=traefik.enable=true
+Label=traefik.http.services.registry.loadbalancer.server.port=5000
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

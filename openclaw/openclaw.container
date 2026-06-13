@@ -1,0 +1,56 @@
+# OpenClaw — always-on AI agent director.
+# Quadlet unit (systemd --user). Symlinked into ~/.config/containers/systemd/.
+#
+# OpenClaw is the orchestration layer above OpenShell: it creates and manages
+# worker sandboxes via the OpenShell gateway CLI (openshell sandbox create/exec).
+# Workers (Claude Code, Codex, Gemini) run in isolated OpenShell sandboxes;
+# OpenClaw dispatches tasks and aggregates results.
+#
+# First-run checklist:
+#   1. bootstrap/init-secrets.sh  — creates the `anthropic_api_key` Podman secret
+#   2. cp openclaw/openclaw.env.example openclaw/openclaw.env  — fill in gateway URL
+#   3. systemctl --user start openclaw  — starts the container
+#   4. Open http://openclaw.lab.lan  — configure OpenShell as the sandbox backend
+#      (Settings → Gateway → OpenShell → gateway URL: http://host.containers.internal:17670)
+#
+# Custom image (with openshell CLI pre-installed):
+#   podman build -t registry.lab.lan/openclaw:latest openclaw/
+#   podman push --tls-verify=false registry.lab.lan/openclaw:latest
+#   Update Image= below to registry.lab.lan/openclaw:latest
+[Unit]
+Description=OpenClaw — AI agent director (orchestrates OpenShell worker sandboxes)
+Wants=network-online.target openshell-gateway.service
+After=network-online.target openshell-gateway.service
+
+[Container]
+ContainerName=openclaw
+# Use upstream image until the custom build (with openshell CLI) is pushed to the
+# local registry. Switch to registry.lab.lan/openclaw:latest after: podman build + push.
+Image=docker.io/openclaw/openclaw:latest
+Network=ai-net.network
+
+# Persistent agent state (memory, task history, schedules).
+Volume=openclaw-state.volume:/home/user/.openclaw
+
+# Runtime config (non-secret). Copy openclaw.env.example to openclaw.env and fill in.
+EnvironmentFile=%h/home-lab/openclaw/openclaw.env
+
+# ANTHROPIC_API_KEY from Podman secret (created by bootstrap/init-secrets.sh).
+Secret=anthropic_api_key,type=env,target=ANTHROPIC_API_KEY
+
+# Browser automation requires SYS_ADMIN + shared memory.
+# Uncomment when browser-based tasks are needed; leave off otherwise.
+# AddCapability=SYS_ADMIN
+# PodmanArgs=--shm-size=1g
+
+# Traefik: name-derived route -> openclaw.lab.lan
+# Port must be declared: OpenClaw serves on 18789, not 80.
+Label=traefik.enable=true
+Label=traefik.http.services.openclaw.loadbalancer.server.port=18789
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target
