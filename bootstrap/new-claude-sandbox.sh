@@ -7,7 +7,7 @@
 #
 # Flags (composable — combine freely):
 #   --bedrock              inject Bedrock keys from ~/home-lab/.secrets/bedrock.env
-#   --claudeai             clone Claude.ai token from host ~/.claude/credentials.json
+#   --claudeai             clone Claude.ai token from host ~/.claude/.credentials.json
 #   --clone <src>          clone token from a running OpenShell sandbox (agent-agnostic)
 #
 # Examples:
@@ -23,7 +23,8 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 POLICY="$REPO_DIR/openshell/policies/claude-code.yaml"
 BEDROCK_ENV="$REPO_DIR/.secrets/bedrock.env"
-HOST_CREDS="$HOME/.claude/credentials.json"
+HOST_CREDS="$HOME/.claude/.credentials.json"
+HOST_SETTINGS="$HOME/.claude/settings.json"
 BEDROCK_PROJECT_SETTINGS="$REPO_DIR/openshell/project-settings/bedrock-test.json"
 
 say() { printf '\n\033[1;36m==>\033[0m %s\n' "$*"; }
@@ -62,9 +63,13 @@ done
 ( $USE_CLAUDEAI && $USE_CLONE ) \
   && die "--claudeai and --clone are mutually exclusive (both clone auth; pick one)"
 
-# ---- temp file — holds cloned credentials, auto-cleaned on any exit -----------
+# ---- temp files — hold cloned credentials/settings, auto-cleaned on any exit --
 TMPFILE=""
-cleanup() { [[ -z "$TMPFILE" || ! -f "$TMPFILE" ]] || rm -f "$TMPFILE"; }
+TMPFILE_SETTINGS=""
+cleanup() {
+  [[ -z "$TMPFILE"          || ! -f "$TMPFILE"          ]] || rm -f "$TMPFILE"
+  [[ -z "$TMPFILE_SETTINGS" || ! -f "$TMPFILE_SETTINGS" ]] || rm -f "$TMPFILE_SETTINGS"
+}
 trap cleanup EXIT
 
 # ---- preflight ----------------------------------------------------------------
@@ -87,7 +92,10 @@ fi
 if $USE_CLAUDEAI; then
   [[ -r "$HOST_CREDS" ]] \
     || die "--claudeai: $HOST_CREDS not found. Run 'claude login' on the host first."
-  ok "Host credentials.json readable"
+  ok "Host .credentials.json readable"
+  [[ -r "$HOST_SETTINGS" ]] \
+    || die "--claudeai: $HOST_SETTINGS not found. Expected after first run of claude on the host."
+  ok "Host settings.json readable"
 fi
 
 if $USE_CLONE; then
@@ -98,25 +106,34 @@ fi
 
 # ---- read credentials now (before create — fail fast) -------------------------
 if $USE_CLAUDEAI; then
-  say "Reading Claude.ai token from host director"
-  TMPFILE="$(mktemp)"
-  chmod 600 "$TMPFILE"
+  say "Reading Claude.ai state from host director"
+  TMPFILE="$(mktemp)"; chmod 600 "$TMPFILE"
   cp "$HOST_CREDS" "$TMPFILE"
-  ok "Token copied (will upload post-create)"
+  ok ".credentials.json copied"
+  TMPFILE_SETTINGS="$(mktemp)"; chmod 600 "$TMPFILE_SETTINGS"
+  cp "$HOST_SETTINGS" "$TMPFILE_SETTINGS"
+  ok "settings.json copied (theme, skipDangerousModePermissionPrompt, onboarding state)"
 fi
 
 if $USE_CLONE; then
-  say "Reading credentials from sandbox '$CLONE_SRC'"
-  TMPFILE="$(mktemp)"
-  chmod 600 "$TMPFILE"
-  # try both filenames — claude login creates credentials.json or .credentials.json
-  # depending on version; try non-dot first (current default), dot as fallback
+  say "Reading Claude state from sandbox '$CLONE_SRC'"
+  TMPFILE="$(mktemp)"; chmod 600 "$TMPFILE"
+  # try both filenames — .credentials.json (current) or credentials.json (older versions)
   if ! openshell sandbox exec -n "$CLONE_SRC" -- \
-       sh -c 'cat /sandbox/.claude/credentials.json 2>/dev/null || cat /sandbox/.claude/.credentials.json' \
-       > "$TMPFILE" || [[ ! -s "$TMPFILE" ]]; then
+       sh -c 'cat /sandbox/.claude/.credentials.json 2>/dev/null || cat /sandbox/.claude/credentials.json' \
+       > "$TMPFILE" 2>/dev/null || [[ ! -s "$TMPFILE" ]]; then
     die "Could not read credentials from '$CLONE_SRC'. Is it running and authenticated?"
   fi
-  ok "Credentials read from '$CLONE_SRC' (will upload post-create)"
+  ok "Credentials read from '$CLONE_SRC'"
+  TMPFILE_SETTINGS="$(mktemp)"; chmod 600 "$TMPFILE_SETTINGS"
+  openshell sandbox exec -n "$CLONE_SRC" -- \
+    cat /sandbox/.claude/settings.json > "$TMPFILE_SETTINGS" 2>/dev/null || true
+  if [[ -s "$TMPFILE_SETTINGS" ]]; then
+    ok "settings.json read from '$CLONE_SRC'"
+  else
+    ok "No settings.json in '$CLONE_SRC' — sandbox will use defaults"
+    TMPFILE_SETTINGS=""
+  fi
 fi
 
 # ---- sandbox create -----------------------------------------------------------
@@ -145,12 +162,16 @@ openshell sandbox create \
 
 ok "Sandbox '$SANDBOX_NAME' created"
 
-# ---- upload credentials (--claudeai or --clone) --------------------------------
+# ---- upload credentials + settings (--claudeai or --clone) --------------------
 if $USE_CLAUDEAI || $USE_CLONE; then
-  say "Uploading credentials into sandbox"
+  say "Uploading Claude state into sandbox"
   openshell sandbox exec -n "$SANDBOX_NAME" -- mkdir -p /sandbox/.claude
-  openshell sandbox upload -n "$SANDBOX_NAME" "$TMPFILE" /sandbox/.claude/credentials.json
-  ok "Credentials uploaded → /sandbox/.claude/credentials.json"
+  openshell sandbox upload -n "$SANDBOX_NAME" "$TMPFILE" /sandbox/.claude/.credentials.json
+  ok "Credentials uploaded → /sandbox/.claude/.credentials.json"
+  if [[ -n "$TMPFILE_SETTINGS" && -s "$TMPFILE_SETTINGS" ]]; then
+    openshell sandbox upload -n "$SANDBOX_NAME" "$TMPFILE_SETTINGS" /sandbox/.claude/settings.json
+    ok "Settings uploaded  → /sandbox/.claude/settings.json (no login wizard, theme preserved)"
+  fi
 fi
 
 # ---- upload bedrock project example settings -----------------------------------
