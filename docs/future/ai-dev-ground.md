@@ -230,67 +230,60 @@ How a sandbox gets its auth matters once there's more than one. Established
     `settings.json` after create.
 - **The live `claude-code` sandbox keeps its auth** in `/sandbox/.claude/` across
   reconnects and on disk — but it is **not pinned to survive a reboot** (restart
-  policy `no`, no systemd/Quadlet unit). Phase 5's always-on OpenClaw will need a
-  Quadlet/restart policy precisely for this reason.
+  policy `no`, no systemd/Quadlet unit). OpenClaw (Phase 4) handles this via its
+  Quadlet `Restart=on-failure` — worker sandboxes are ephemeral by design.
 - **Reproducible spawn is a TODO** — `bootstrap/new-claude-sandbox.sh` (see
   [todos.md](../current/todos.md)) folds the create-with-`--env` + policy + settings
   upload into one command, leaving only `claude login` manual. This is the missing
   piece between "works on the one sandbox I hand-built" and "spawn an auth-ready
   agent on any host."
 
-## Phase 4 — Add Codex and Gemini CLI
+## Phase 4 — OpenClaw director + local registry + secrets manager
 
-- **Codex**: already in the base sandbox image. `openshell sandbox create -- codex`; provider uses `OPENAI_API_KEY`; policy needs `api.openai.com`.
-- **Gemini CLI**: not in the base image — use BYOC. Copy the [bring-your-own-container example](https://github.com/NVIDIA/OpenShell/tree/main/examples/bring-your-own-container), add `npm install -g @google/gemini-cli` to the Dockerfile, then `openshell sandbox create --from ./gemini-sandbox -- gemini`. Provider: `GEMINI_API_KEY`; policy: `generativelanguage.googleapis.com`.
+**Live ✅ (2026-06-13) — claude-cli backend working; 2 items remain (see [todos.md](../current/todos.md)).**
 
-One sandbox per agent keeps policies and credentials cleanly scoped.
+OpenClaw's native design (per `docs.openclaw.ai`) is to run **outside** OpenShell as a host-side director. It calls `openshell sandbox create` to provision worker sandboxes, retrieves SSH connection details via `openshell sandbox ssh-config`, and connects into those sandboxes over SSH to dispatch tasks. The director must sit outside the sandbox environment — a sandbox cannot orchestrate other sandboxes through the same gateway.
 
-## Phase 5 — Always-on OpenClaw assistant
+Architecture: OpenClaw runs as a rootless Podman **Quadlet** (`openclaw.container`) on `ai-net`, exposed at `openclaw.lab.lan` via Traefik. It holds Bedrock AWS credentials via Podman secrets and calls the OpenShell gateway at `http://host.containers.internal:17670` to spawn and manage worker sandboxes (Claude Code, Codex, Gemini).
 
-The goal of this phase is an always-on assistant agent in a hardened sandbox, completing the agent baseline (Claude Code, Codex, Gemini, OpenClaw — and optionally Hermes), all on Podman. **NemoClaw is a wrapper, not the agent** — [OpenClaw](https://github.com/openclaw/openclaw) and Hermes are standalone open-source agents; NemoClaw bundles guided onboarding, an inference router, hardened policy presets, and lifecycle CLI around them, and pulls Nemotron models. We run OpenClaw directly here to keep the whole baseline on one runtime, and keep NemoClaw on the roadmap as a deliberate experiment in [Phase 6](#phase-6--nemoclaw-experiment-deferred) once that baseline is solid.
+A custom image (`openclaw/Containerfile`) bakes the Claude Code CLI and `openshell` CLIs in. The image sets `USER root` and uses `entrypoint.sh` to `chmod 644` the host-mounted `~/.claude` credentials before dropping to the `node` user via `runuser`. This is a workaround for rootless Podman's uid-namespace mapping — see Phase 8 for the clean fix. The registry Quadlet (`registry.lab.lan`) stores the image locally.
 
-Why run OpenClaw directly rather than via NemoClaw *now* — weighed against this no-GPU/remote-API setup:
+**Built in this phase:** `openclaw.container`, `openclaw-state.volume`, `Containerfile`, `entrypoint.sh`, `registry.container`, `bootstrap/init-secrets.sh`, `osbox` idempotency.
 
-| NemoClaw feature | Needed here? |
-|---|---|
-| Onboarding wizard | No — write a BYOC Containerfile + policy YAML, same as Gemini in Phase 4 |
-| Inference router (`inference.local`) | **No** — its real win is routing to *local* vLLM/Nemotron; you're remote-APIs-only, and OpenShell providers already inject `ANTHROPIC_API_KEY`/Bedrock creds |
-| Hardened policy presets | No — reuse/tighten the policy you wrote for Claude Code |
-| Lifecycle CLI | No — `openshell sandbox` commands, same as the other agents |
-| Nemotron models | Irrelevant — remote APIs |
+**Remaining (tracked in [todos.md](../current/todos.md)):**
+- Configure OpenShell backend in the OpenClaw UI → Settings → Gateway → OpenShell → `http://host.containers.internal:17670`
+- Fix Bedrock model ID: `model_not_found` on `us.anthropic.claude-sonnet-4-6`; needs the full versioned inference-profile ARN
 
-NemoClaw's value concentrates in the local-inference case you're deliberately skipping for now, so it's **deferred to [Phase 6](#phase-6--nemoclaw-experiment-deferred), not dropped** — revisited once you add GPU + vLLM in the k3s phase.
+## Phase 5 — Codex CLI sandbox
 
-### Run OpenClaw as an OpenShell BYOC sandbox (Podman)
+Add OpenAI Codex CLI as a first-class `osbox`-managed agent. Codex is already in the base OpenShell sandbox image (`openshell sandbox create -- codex`) — `osbox` wraps this with credential staging and the `AGENT_CMD` hook.
 
-Same pattern as Gemini in Phase 4 — no Docker, no NemoClaw.
+- **`init-secrets` update** — add Codex section: prompts for `OPENAI_API_KEY`, writes `.secrets/codex.env`, creates `codex_openai_api_key` Podman secret.
+- **`openshell/policies/codex.yaml`** — egress policy for `api.openai.com`.
+- **`--codex` flag for `osbox`** — sets `AGENT_CMD=codex`, sources `OPENAI_API_KEY` from `.secrets/codex.env`. The `AGENT_CMD` hook is already wired.
+- **`openshell/project-settings/codex-test.json`** — committed non-secret opt-in settings (mirrors `bedrock-test.json` pattern).
+- **Verify** `osbox codex-1 --codex --headless` → dispatch `openshell sandbox exec -n codex-1 -- codex -p "task"`.
 
-1. BYOC Containerfile based on the OpenShell sandbox image, adding OpenClaw:
-   ```dockerfile
-   # OpenClaw — standalone always-on assistant (github.com/openclaw/openclaw)
-   RUN curl -fsSL https://openclaw.ai/install.sh | bash -s -- --install-method git --version main
-   ```
-2. Run it always-on (OpenClaw ships a daemon mode):
-   ```bash
-   openshell sandbox create --from ./openclaw-sandbox -- openclaw onboard --install-daemon
-   ```
-3. **Inference:** point OpenClaw straight at the API via the OpenShell provider that already injects `ANTHROPIC_API_KEY` (or Bedrock creds) — no router needed.
-4. **Policy:** reuse and tighten the network policy from Claude Code; OpenShell's `generate-sandbox-policy` skill drafts it from plain English.
-5. **Dashboard/TUI:** expose via SSH tunnel, or put the sandbox on `ai-net` for Traefik at `openclaw.lab.lan`.
+## Phase 6 — Gemini CLI sandbox
 
-**Why this shape:** every agent (Claude Code, Codex, Gemini, OpenClaw) becomes "just another OpenShell sandbox" — one runtime, one lifecycle, one policy mechanism, no alpha-on-alpha NemoClaw layer. You trade NemoClaw's one-command onboarding and managed router (≈80% of the polish) for manual BYOC wiring — and you get that polish back to evaluate in Phase 6.
+Add Google Gemini CLI as a sandboxed agent. Gemini CLI is not in the base OpenShell image, so it uses BYOC.
 
-**Verify during prototyping:** OpenShell sandboxes are built around agent *sessions*; confirm OpenClaw's daemon persists and stays reachable as a long-running process inside one.
+- **`init-secrets` update** — add Gemini section: `GOOGLE_API_KEY`, writes `.secrets/gemini.env`, creates `gemini_api_key` Podman secret.
+- **BYOC Containerfile** — extend the OpenShell sandbox base image with `npm install -g @google/gemini-cli`; build and push to `registry.lab.lan`.
+- **`openshell/policies/gemini.yaml`** — egress for `generativelanguage.googleapis.com` and GCP auth endpoints.
+- **`--gemini` flag for `osbox`** — sets `AGENT_CMD=gemini`, sources key from `.secrets/gemini.env`; `openshell sandbox create --from ./gemini-sandbox`.
+- **`openshell/project-settings/gemini-test.json`**.
+- **Verify** `osbox gemini-1 --gemini --headless` → dispatch `openshell sandbox exec -n gemini-1 -- gemini -p "task"`.
 
-> Hermes (Nous Research) is the other supported agent, but it's a self-evolving *research* agent rather than an always-on assistant, and its easy path ([`hermesclaw`](https://github.com/TheAiSingularity/hermesclaw)) hard-requires Docker — reintroducing the dependency you're avoiding. For an always-on assistant on Podman, prefer OpenClaw. A `hermes-open-sandbox` pip backend exists if you want Hermes specifically.
+## Phase 7 — NemoClaw experiment + NeMo Agent Toolkit
 
-## Phase 6 — NemoClaw experiment (deferred)
+> **Do this only after Phases 4–6 are running** — OpenClaw directing Claude Code, Codex, and Gemini worker sandboxes all verified. NemoClaw stays on the roadmap as a deliberate experiment once that baseline is solid.
 
-> **Do this only after Phases 2–5 are running** — OpenShell, Claude Code, Codex, Gemini, OpenClaw (and optionally Hermes), all on Podman. NemoClaw stays on the roadmap as a deliberate experiment to explore once that baseline exists, **even if it ends up being the only service that runs under Docker.**
+### NemoClaw experiment (deferred)
 
-NemoClaw is NVIDIA's one-command stack wrapping OpenClaw/Hermes with guided onboarding, a managed inference router, hardened policy presets, and lifecycle CLI. Running it *after* the hand-rolled baseline is the point: the baseline gives you a reference to measure it against — what does NemoClaw's router and policy automation actually buy over the BYOC OpenClaw you already understand from Phase 5? It becomes most compelling when you add **local inference** (GPU + vLLM/Nemotron) in the k3s phase, which is exactly what its router is built for.
+NemoClaw is NVIDIA's one-command stack wrapping OpenClaw/Hermes with guided onboarding, a managed inference router, hardened policy presets, and lifecycle CLI. Running it *after* the hand-rolled baseline is the point — the baseline gives you a reference to measure it against. NemoClaw becomes most compelling once you add **local inference** (GPU + vLLM/Nemotron) in the k3s phase, which is exactly what its router is built for.
 
-**Prerequisite:** the optional Docker Engine install from [Phase 1](#phase-1--vm-base-prep). Docker and rootless Podman coexist fine — treat NemoClaw as an isolated Docker island alongside the Podman baseline, not a migration off Podman. Don't run `openshell` commands directly against NemoClaw-managed sandboxes.
+**Prerequisite:** Docker Engine (the one place Docker has an edge — NemoClaw's tested Linux path). Docker and rootless Podman coexist fine; treat NemoClaw as an isolated Docker island alongside the Podman baseline.
 
 ```bash
 curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash   # runs `nemoclaw onboard` wizard; verify URL against current NemoClaw docs
@@ -299,12 +292,11 @@ curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash   # runs `nemoclaw onboard`
 - Wizard prompts: sandbox name → inference provider → network policy preset.
 - Provider for this setup: **Anthropic** (option 4) or **Anthropic-compatible endpoint** (option 5) for Bedrock gateway.
 - Dashboard at `http://127.0.0.1:18789/#token=...` (printed once — save it). LAN access: SSH tunnel `ssh -L 18789:127.0.0.1:18789 user@vm`.
-- Lifecycle: use `nemoclaw onboard` / `nemoclaw <name> rebuild`.
-- Terminal access: `nemoclaw <name> connect` then `openclaw tui`.
+- Lifecycle: `nemoclaw onboard` / `nemoclaw <name> rebuild`. Terminal: `nemoclaw <name> connect` then `openclaw tui`.
 
-**What to evaluate:** whether NemoClaw's managed router + policy presets justify the Docker dependency over the direct-BYOC OpenClaw from Phase 5; how cleanly it coexists with the Podman services; and whether its inference routing earns its keep once local vLLM/Nemotron is in play.
+**What to evaluate:** whether NemoClaw's router + policy presets justify the Docker dependency over the direct-Quadlet OpenClaw from Phase 4; and whether its inference routing earns its keep once local vLLM/Nemotron is in play.
 
-## Phase 7 — NeMo Agent Toolkit orchestration
+### NeMo Agent Toolkit orchestration
 
 ```bash
 # In a venv on the VM (or in its own sandbox)
@@ -314,6 +306,27 @@ pip install nvidia-nat   # check repo for current package name
 - Define workflows in YAML/Python routing tasks across agents.
 - Use **MCP** to expose tools to/from sandboxes, **A2A** to delegate between agents.
 - Pattern: NeMo Agent Toolkit as planner/router → dispatches tasks into Claude Code / Codex / Gemini sandboxes → OpenShell enforces what each can touch.
+
+## Phase 8 — OpenClaw rootless credential access
+
+**Goal:** eliminate the `USER root` + `entrypoint.sh chmod` workaround so credentials stay at mode 600 on the host.
+
+**Root cause:** In rootless Podman, container uid 0 (root) = host uid 1000 (debian). The `node` user at container uid 1000 maps to a sub-uid on the host (~uid 101000) and cannot read 600-mode files owned by debian. The current workaround chmods the files to 644 at startup.
+
+**Preferred fix — `--userns=keep-id`:**
+Add `PodmanArgs=--userns=keep-id` to `openclaw.container`. This maps container uid 1000 (`node`) to host uid 1000 (`debian`) directly, so `node` can read 600-mode credential files. Steps:
+1. Stop openclaw: `systemctl --user stop openclaw`
+2. Re-chown the state volume to the new uid mapping:
+   ```bash
+   STATE=$(podman volume inspect systemd-openclaw-state --format '{{.Mountpoint}}')
+   podman unshare chown -R 1000:1000 "$STATE"
+   ```
+3. Add `PodmanArgs=--userns=keep-id` to `[Container]` in `openclaw.container`
+4. Revert `Containerfile` to end with `USER node` (remove `USER root`, `COPY entrypoint.sh`, `ENTRYPOINT`, `CMD`)
+5. Remove `openclaw/entrypoint.sh`
+6. Rebuild, push, start
+
+**Alternative:** POSIX ACLs — `setfacl -m u:$(podman unshare id -u node):r ~/.claude/.credentials.json ~/.claude.json`. No uid remapping needed, but requires `acl` package and doesn't help with files written by future OpenClaw runs.
 
 ---
 
@@ -403,8 +416,7 @@ When you add a second/third Optiplex:
 
 - [x] `bootstrap/setup-host.sh` — idempotent host rebuild
 - [x] AdGuard wildcard `*.lab.lan → 192.168.0.51` (on AdGuard LXC `.53`)
-- [ ] Podman secrets: `anthropic_api_key`, AWS Bedrock creds
-- [ ] Local image registry `:5000`
+- [x] Local image registry (`registry.lab.lan`)
 
 **Phases:**
 
@@ -413,10 +425,12 @@ When you add a second/third Optiplex:
 3. [x] Phase 3: Subscription ↔ Bedrock per-project switching — **complete** —
    policy v2 (Bedrock egress), us-east-1, default `us.anthropic.claude-sonnet-4-6`;
    both paths verified via `claude -p` (Bedrock from project dir, subscription elsewhere)
-4. [ ] Phase 4: Codex sandbox; Gemini CLI BYOC sandbox
-5. [ ] Phase 5: Always-on OpenClaw assistant (direct BYOC on Podman) — **completes the Podman baseline**
-6. [ ] Phase 6: NemoClaw experiment (deferred; the one Docker service) — explore after baseline
-7. [ ] Phase 7: NeMo Agent Toolkit orchestration layer
+4. [x] Phase 4: OpenClaw director Quadlet + local registry + secrets manager — **live 2026-06-13**. claude-cli backend working; Traefik HTTPS + device pairing confirmed. Remaining: OpenShell backend UI wiring; Bedrock model ID fix.
+5. [ ] Phase 5: Codex CLI sandbox (`osbox --codex`)
+6. [ ] Phase 6: Gemini CLI sandbox (`osbox --gemini`, BYOC)
+7. [ ] Phase 7: NemoClaw experiment (deferred; the one Docker service) + NeMo Agent Toolkit orchestration
+8. [ ] Phase 8: OpenClaw rootless credential access — `--userns=keep-id` + revert `USER root`/entrypoint.sh
+9. [ ] Phase 9: Alternative providers (OpenAI, Grok, Gemini CLI, Copilot, OpenRouter)
 
 ---
 

@@ -1,0 +1,68 @@
+# OpenClaw — always-on AI agent director.
+# Quadlet unit (systemd --user). Symlinked into ~/.config/containers/systemd/.
+#
+# OpenClaw is the orchestration layer above OpenShell: it creates and manages
+# worker sandboxes via the OpenShell gateway CLI (openshell sandbox create/exec).
+# Workers (Claude Code, Codex, Gemini) run in isolated OpenShell sandboxes;
+# OpenClaw dispatches tasks and aggregates results.
+#
+# First-run checklist (setup-host.sh handles steps 1 and 2 automatically):
+#   1. [auto] bootstrap/setup-host.sh builds + pushes registry.lab.lan/openclaw:latest
+#   2. [auto] openclaw.json pre-seeded in the state volume by setup-host.sh
+#   3. bootstrap/init-secrets.sh  — creates Bedrock Podman secrets
+#   4. cp openclaw/openclaw.env.example openclaw/openclaw.env
+#   5. systemctl --user start openclaw
+#   6. Open https://openclaw.lab.lan — approve device pairing, then
+#      Settings → Gateway → OpenShell → URL: http://host.containers.internal:17670
+#
+# To rebuild the custom image manually:
+#   podman build -t registry.lab.lan/openclaw:latest openclaw/
+#   podman push --tls-verify=false registry.lab.lan/openclaw:latest
+[Unit]
+Description=OpenClaw — AI agent director (orchestrates OpenShell worker sandboxes)
+Wants=network-online.target openshell-gateway.service
+After=network-online.target openshell-gateway.service
+
+[Container]
+ContainerName=openclaw
+# Use upstream image until the custom build (with openshell CLI) is pushed to the
+# local registry. Switch to registry.lab.lan/openclaw:latest after: podman build + push.
+Image=registry.lab.lan/openclaw:latest
+Network=ai-net.network
+
+# Persistent agent state (memory, task history, schedules).
+Volume=openclaw-state.volume:/home/node/.openclaw
+
+# Runtime config (non-secret). Copy openclaw.env.example to openclaw.env and fill in.
+EnvironmentFile=%h/home-lab/openclaw/openclaw.env
+
+# Claude CLI credentials — mount host ~/.claude and ~/.claude.json so the bundled
+# claude-cli backend can reuse the existing `claude login` session (no API key needed).
+# OpenClaw invokes `claude -p` (non-interactive); Anthropic has sanctioned this usage.
+# Container runs as root (= host uid 1000/debian in rootless Podman) so both files
+# are readable despite their 600 permissions.
+Volume=/home/debian/.claude:/home/node/.claude:z
+Volume=/home/debian/.claude.json:/home/node/.claude.json:z
+
+# AWS Bedrock credentials — fallback provider if claude-cli is unavailable.
+# OpenClaw auto-detects these and enables the implicit Bedrock provider.
+Secret=bedrock_aws_access_key_id,type=env,target=AWS_ACCESS_KEY_ID
+Secret=bedrock_aws_secret_access_key,type=env,target=AWS_SECRET_ACCESS_KEY
+Secret=bedrock_aws_region,type=env,target=AWS_REGION
+
+# Browser automation requires SYS_ADMIN + shared memory.
+# Uncomment when browser-based tasks are needed; leave off otherwise.
+# AddCapability=SYS_ADMIN
+# PodmanArgs=--shm-size=1g
+
+# Traefik: name-derived route -> openclaw.lab.lan
+# Port must be declared: OpenClaw serves on 18789, not 80.
+Label=traefik.enable=true
+Label=traefik.http.services.openclaw.loadbalancer.server.port=18789
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target
