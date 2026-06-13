@@ -1,28 +1,27 @@
 #!/usr/bin/env bash
 #
-# setup-host.sh — idempotent bootstrap for the home-lab VM (Debian 13, rootless).
+# setup-host.sh — idempotent bootstrap for the home-lab VM (Debian 13).
 #
 # Reproduces the full host from a clean checkout. Safe to re-run: every step
 # checks current state before changing anything. Run as the unprivileged service
-# user (debian) — NOT root. Uses sudo only for the few system-level steps.
+# user (debian) — NOT root. Uses sudo only for system-level steps.
 #
 #   git clone <this repo> ~/home-lab && ~/home-lab/bootstrap/setup-host.sh
 #
 # What this script does NOT do (manual / sensitive — see docs/current/todos.md):
 #   - AdGuard *.lab.lan wildcard (lives on the AdGuard LXC, not this host)
-#   - Podman secrets / API credentials (run: init-secrets)
+#   - API credentials (run: init-secrets)
 #   - `claude login` (interactive OAuth — cannot be scripted)
-#   - cp openclaw/openclaw.env.example openclaw/openclaw.env
+#   - NemoClaw onboard (interactive wizard — run after init-secrets + docker compose up)
 #   - Install CA cert on client devices (see README.md § 'HTTPS / local CA trust')
-#   - Start services: systemctl --user start traefik portainer registry openclaw
 set -euo pipefail
 
-# ---- config ---------------------------------------------------------------
+# ---- config ------------------------------------------------------------------
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NODE_MAJOR=22
 OPENSHELL_VERSION="${OPENSHELL_VERSION:-v0.0.62}"   # pin; override to upgrade
 MKCERT_VERSION="v1.4.4"
-SYSTEMD_USER_DIR="${HOME}/.config/containers/systemd"
+COMPOSE_FILE="${REPO_DIR}/docker/compose.yml"
 OPENSHELL_CFG_DIR="${HOME}/.config/openshell"
 CERT_DIR="${REPO_DIR}/traefik/certs"
 CA_DIR="${CERT_DIR}/ca"
@@ -34,7 +33,7 @@ if [ "$(id -u)" -eq 0 ]; then
   echo "Run as the service user (e.g. debian), not root." >&2; exit 1
 fi
 
-# ---- 1. base packages -----------------------------------------------------
+# ---- 1. base packages --------------------------------------------------------
 say "Base packages"
 if ! have curl || ! have git || ! have gpg; then
   sudo apt-get update -qq
@@ -43,7 +42,7 @@ else
   echo "curl/git/gnupg present — skipping"
 fi
 
-# ---- 2. Node.js (Phase 1) -------------------------------------------------
+# ---- 2. Node.js (required by NemoClaw CLI) -----------------------------------
 say "Node.js ${NODE_MAJOR}"
 if have node && [ "$(node -v | sed 's/v\([0-9]*\).*/\1/')" -ge "$NODE_MAJOR" ]; then
   echo "node $(node -v) present — skipping"
@@ -53,71 +52,65 @@ else
 fi
 node -v; npm -v
 
-# ---- 3. rootless plumbing (linger, podman socket, :80/:443) ---------------
-say "Rootless plumbing"
+# ---- 3. Docker Engine --------------------------------------------------------
+say "Docker Engine"
+if have docker && docker version >/dev/null 2>&1; then
+  echo "docker $(docker version --format '{{.Server.Version}}' 2>/dev/null) present — skipping install"
+else
+  curl -fsSL https://get.docker.com | sudo sh
+  echo "Docker Engine installed"
+fi
+
+# Add user to docker group (no-op if already a member).
+if ! groups | grep -q '\bdocker\b'; then
+  sudo usermod -aG docker "$USER"
+  echo "Added $USER to docker group. A re-login is required for group membership"
+  echo "to take effect in interactive shells. This script uses 'sudo docker' for now."
+fi
+sudo systemctl enable --now docker
+
+# Use sudo docker if not yet in the docker group in this session.
+if groups | grep -q '\bdocker\b'; then
+  DOCKER="docker"
+else
+  DOCKER="sudo docker"
+fi
+
+# ---- 4. Linger (keeps OpenShell gateway alive after logout) ------------------
+say "Linger for $USER"
 loginctl show-user "$USER" 2>/dev/null | grep -q 'Linger=yes' \
   || sudo loginctl enable-linger "$USER"
-systemctl --user enable --now podman.socket
-# Allows binding ports 80 and 443 without root (443 is above 80 so also covered).
-if [ ! -f /etc/sysctl.d/99-unprivileged-ports.conf ]; then
-  echo 'net.ipv4.ip_unprivileged_port_start=80' | sudo tee /etc/sysctl.d/99-unprivileged-ports.conf
-  sudo sysctl --system >/dev/null
-fi
+echo "linger enabled"
 
-# ---- 4. Quadlet services (ai-net, traefik, portainer, registry, openclaw) -
-say "Quadlet symlinks -> ${SYSTEMD_USER_DIR}"
-mkdir -p "$SYSTEMD_USER_DIR"
-while IFS= read -r unit; do
-  ln -sfn "$unit" "$SYSTEMD_USER_DIR/$(basename "$unit")"
-  echo "linked $(basename "$unit")"
-done < <(find "$REPO_DIR"/networks "$REPO_DIR"/traefik "$REPO_DIR"/portainer \
-              "$REPO_DIR"/registry "$REPO_DIR"/openclaw \
-              -name '*.network' -o -name '*.container' -o -name '*.volume' 2>/dev/null)
-systemctl --user daemon-reload
-
-# ---- 5. OpenShell (Phase 2) -----------------------------------------------
-say "OpenShell ${OPENSHELL_VERSION}"
-if have openshell && [ "$(openshell --version 2>/dev/null | awk '{print $2}')" = "${OPENSHELL_VERSION#v}" ]; then
-  echo "openshell ${OPENSHELL_VERSION} present — skipping install"
+# ---- 5. Docker daemon: insecure registry config ------------------------------
+say "Docker daemon: insecure registry (registry.lab.lan:5000)"
+DAEMON_JSON="/etc/docker/daemon.json"
+if ! grep -q 'registry.lab.lan' "$DAEMON_JSON" 2>/dev/null; then
+  sudo mkdir -p /etc/docker
+  if [ -f "$DAEMON_JSON" ]; then
+    python3 -c "
+import json, sys
+with open('${DAEMON_JSON}') as f:
+    d = json.load(f)
+d.setdefault('insecure-registries', [])
+if 'registry.lab.lan:5000' not in d['insecure-registries']:
+    d['insecure-registries'].append('registry.lab.lan:5000')
+print(json.dumps(d, indent=2))
+" | sudo tee "$DAEMON_JSON" >/dev/null
+  else
+    printf '{\n  "insecure-registries": ["registry.lab.lan:5000"]\n}\n' \
+      | sudo tee "$DAEMON_JSON" >/dev/null
+  fi
+  sudo systemctl reload docker
+  echo "insecure-registries updated in ${DAEMON_JSON}"
 else
-  OPENSHELL_VERSION="$OPENSHELL_VERSION" \
-    sh -c 'curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh'
+  echo "registry.lab.lan already in daemon.json — skipping"
 fi
 
-# ---- 6. OpenShell gateway config (Podman driver + 0.0.0.0 bind) -----------
-say "OpenShell gateway config"
-mkdir -p "$OPENSHELL_CFG_DIR"
-ln -sfn "$REPO_DIR/openshell/gateway.env" "$OPENSHELL_CFG_DIR/gateway.env"
-systemctl --user restart openshell-gateway
-sleep 2
-if journalctl --user -u openshell-gateway --since "30 seconds ago" --no-pager 2>/dev/null \
-     | grep -q 'compute driver driver=podman'; then
-  echo "gateway up on Podman driver"
-else
-  echo "WARNING: gateway did not report the Podman driver. See bootstrap/TROUBLESHOOTING.md" >&2
-  echo "         (check: ss -tlnp | grep 17670  should be 0.0.0.0:17670, not 127.0.0.1)" >&2
-fi
-
-# ---- 7. Podman registries config (trust registry.lab.lan as insecure HTTP) -
-say "Podman registries config"
-mkdir -p "$HOME/.config/containers"
-REGS_CONF="$HOME/.config/containers/registries.conf"
-if ! grep -q 'registry.lab.lan' "$REGS_CONF" 2>/dev/null; then
-  cat >> "$REGS_CONF" <<'REGSEOF'
-
-[[registry]]
-location = "registry.lab.lan"
-insecure = true
-REGSEOF
-  echo "added registry.lab.lan insecure registry"
-else
-  echo "registry.lab.lan already configured"
-fi
-
-# ---- 8. /etc/hosts — registry.lab.lan loopback alias ----------------------
+# ---- 6. /etc/hosts — registry.lab.lan loopback alias -------------------------
 say "/etc/hosts entry for registry.lab.lan"
 # The VM resolves DNS via the router, not AdGuard, so *.lab.lan does not resolve
-# on the VM itself. A loopback entry lets `podman build/push registry.lab.lan/...`
+# on the VM itself. A loopback entry lets `docker push registry.lab.lan:5000/...`
 # reach the local registry container without AdGuard.
 if ! grep -q 'registry.lab.lan' /etc/hosts; then
   echo '127.0.0.1  registry.lab.lan' | sudo tee -a /etc/hosts
@@ -126,7 +119,31 @@ else
   echo "registry.lab.lan already in /etc/hosts"
 fi
 
-# ---- 9. mkcert + *.lab.lan wildcard TLS cert ------------------------------
+# ---- 7. OpenShell -----------------------------------------------------------
+say "OpenShell ${OPENSHELL_VERSION}"
+if have openshell && [ "$(openshell --version 2>/dev/null | awk '{print $2}')" = "${OPENSHELL_VERSION#v}" ]; then
+  echo "openshell ${OPENSHELL_VERSION} present — skipping install"
+else
+  OPENSHELL_VERSION="$OPENSHELL_VERSION" \
+    sh -c 'curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh'
+fi
+
+# ---- 8. OpenShell gateway config (Docker driver + 0.0.0.0 bind) --------------
+say "OpenShell gateway config (Docker driver)"
+mkdir -p "$OPENSHELL_CFG_DIR"
+ln -sfn "$REPO_DIR/openshell/gateway.env" "$OPENSHELL_CFG_DIR/gateway.env"
+systemctl --user restart openshell-gateway
+sleep 2
+if journalctl --user -u openshell-gateway --since "30 seconds ago" --no-pager 2>/dev/null \
+     | grep -q 'compute driver driver=docker'; then
+  echo "gateway up on Docker driver"
+else
+  echo "WARNING: gateway did not confirm Docker driver. Check:" >&2
+  echo "         journalctl --user -u openshell-gateway --no-pager | tail -20" >&2
+  echo "  (Also check: ss -tlnp | grep 17670  should be 0.0.0.0:17670)" >&2
+fi
+
+# ---- 9. mkcert + *.lab.lan wildcard TLS cert ---------------------------------
 say "mkcert ${MKCERT_VERSION}"
 MKCERT_BIN="${HOME}/.local/bin/mkcert"
 mkdir -p "${HOME}/.local/bin"
@@ -149,15 +166,12 @@ fi
 
 say "*.lab.lan wildcard cert"
 mkdir -p "$CA_DIR" "$CERT_DIR"
-# The private key is gitignored — its absence on a clean checkout means we need
-# to generate a fresh CA and cert. A new CA means clients must re-install rootCA.pem.
 if [ ! -f "${CERT_DIR}/_wildcard.lab.lan-key.pem" ]; then
   CAROOT="$CA_DIR" "$MKCERT_BIN" -install
   CAROOT="$CA_DIR" "$MKCERT_BIN" \
     -cert-file "${CERT_DIR}/_wildcard.lab.lan.pem" \
     -key-file  "${CERT_DIR}/_wildcard.lab.lan-key.pem" \
     "*.lab.lan"
-  echo "New CA and wildcard cert generated."
   echo ""
   echo "  ACTION REQUIRED: install the CA cert on each client device:"
   echo "    ${CA_DIR}/rootCA.pem"
@@ -167,81 +181,16 @@ else
   echo "Wildcard cert key present — skipping cert generation"
 fi
 
-# ---- 10. OpenClaw state volume + openclaw.json ----------------------------
-say "OpenClaw state volume config"
-# Create the volume if it doesn't exist yet (the Quadlet also creates it on first
-# start, but we need it now to pre-seed the config before OpenClaw runs).
-podman volume inspect systemd-openclaw-state >/dev/null 2>&1 \
-  || podman volume create systemd-openclaw-state
-
-OPENCLAW_DATA="$(podman volume inspect systemd-openclaw-state --format '{{.Mountpoint}}')"
-OPENCLAW_JSON="${OPENCLAW_DATA}/openclaw.json"
-
-if podman unshare sh -c "[ -f '${OPENCLAW_JSON}' ]" 2>/dev/null; then
-  echo "openclaw.json present — skipping"
+# ---- 10. Non-secret runtime configs (auto-create from examples) ---------------
+say "Non-secret env files"
+if [ ! -f "${REPO_DIR}/litellm/litellm.env" ]; then
+  cp "${REPO_DIR}/litellm/litellm.env.example" "${REPO_DIR}/litellm/litellm.env"
+  echo "created litellm/litellm.env from example"
 else
-  podman unshare bash -c "cat > '${OPENCLAW_JSON}'" << 'OCJSON'
-{
-  "gateway": {
-    "mode": "local",
-    "trustedProxies": ["10.89.0.0/24"],
-    "controlUi": {
-      "allowedOrigins": [
-        "http://localhost:18789",
-        "http://127.0.0.1:18789",
-        "https://openclaw.lab.lan"
-      ],
-      "allowInsecureAuth": false
-    }
-  },
-  "agents": {
-    "defaults": {
-      "model": {
-        "primary": "claude-cli/claude-sonnet-4-6",
-        "fallbacks": ["amazon-bedrock/us.anthropic.claude-sonnet-4-6"]
-      },
-      "cliBackends": {
-        "claude-cli": {
-          "command": "/usr/local/bin/claude"
-        }
-      }
-    }
-  }
-}
-OCJSON
-  echo "openclaw.json written to state volume"
+  echo "litellm/litellm.env present — skipping"
 fi
 
-# ---- 11. OpenClaw custom image (bakes claude + openshell CLIs) ------------
-# The image sets USER root so entrypoint.sh can chmod .credentials.json to 644
-# before dropping to the node user via runuser. This is a rootless Podman uid-
-# namespace workaround (container uid 0 = host uid 1000 = debian). Phase 8
-# tracks the clean fix: --userns=keep-id + USER node.
-say "OpenClaw custom image"
-if podman image exists registry.lab.lan/openclaw:latest 2>/dev/null; then
-  echo "registry.lab.lan/openclaw:latest present — skipping build"
-else
-  echo "Starting registry and building OpenClaw image (this takes a few minutes)..."
-  systemctl --user start registry
-  # Wait up to 30s for registry to accept connections.
-  n=0
-  until curl -sf http://registry.lab.lan:5000/v2/ >/dev/null 2>&1 || [ "$n" -ge 15 ]; do
-    sleep 2; n=$((n + 1))
-  done
-  if ! curl -sf http://registry.lab.lan:5000/v2/ >/dev/null 2>&1; then
-    echo "WARNING: registry did not become ready; skipping image build." >&2
-    echo "         Start the registry manually and re-run: systemctl --user start registry" >&2
-  else
-    podman build \
-      --build-arg OPENSHELL_VERSION="$OPENSHELL_VERSION" \
-      -t registry.lab.lan/openclaw:latest \
-      "${REPO_DIR}/openclaw/"
-    podman push --tls-verify=false registry.lab.lan/openclaw:latest
-    echo "OpenClaw image built and pushed to local registry"
-  fi
-fi
-
-# ---- 12. CLI tools (osbox, init-secrets — PATH-resident helpers) ----------
+# ---- 11. CLI tools (osbox, init-secrets — PATH-resident helpers) -------------
 say "CLI tools -> ~/.local/bin"
 mkdir -p "$HOME/.local/bin"
 chmod +x "$REPO_DIR/bootstrap/osbox" "$REPO_DIR/bootstrap/init-secrets.sh"
@@ -250,32 +199,65 @@ ln -sfn "$REPO_DIR/bootstrap/init-secrets.sh" "$HOME/.local/bin/init-secrets"
 echo "osbox        -> $HOME/.local/bin/osbox"
 echo "init-secrets -> $HOME/.local/bin/init-secrets"
 
+# ---- 12. Docker Compose services ---------------------------------------------
+say "Docker Compose services"
+SECRETS_READY=true
+[ -f "${REPO_DIR}/.secrets/litellm.env" ]  || SECRETS_READY=false
+[ -f "${REPO_DIR}/.secrets/bedrock.env" ]  || SECRETS_READY=false
+
+if $SECRETS_READY; then
+  $DOCKER compose -f "$COMPOSE_FILE" up -d --remove-orphans
+  echo "All services started"
+else
+  echo "Secrets not yet populated — run 'init-secrets' first, then:"
+  echo "  docker compose -f docker/compose.yml up -d"
+fi
+
 say "Done. Manual steps remaining (see docs/current/todos.md):"
 cat <<'EOF'
 
   1. Credentials (cannot be scripted):
-       init-secrets                     # Bedrock keys -> Podman secrets + .secrets/
-       claude login                     # interactive OAuth for Claude Code sandboxes
+       init-secrets           # Bedrock keys + LiteLLM master key -> .secrets/*.env
+       claude login           # interactive OAuth (needed for claude-cli backend in NemoClaw)
 
-  2. OpenClaw runtime config:
-       cp openclaw/openclaw.env.example openclaw/openclaw.env
-       # Defaults are fine; OPENCLAW_GATEWAY_TOKEN is already set.
+  2. Start Docker services (if secrets were not populated during this run):
+       docker compose -f docker/compose.yml up -d
 
-  3. Install the local CA on each client device — see README.md § 'HTTPS / local CA trust':
+  3. Smoke-test LiteLLM:
+       LITELLM_KEY=$(grep LITELLM_MASTER_KEY ~/home-lab/.secrets/litellm.env | cut -d= -f2)
+       curl http://localhost:4000/v1/models -H "Authorization: Bearer ${LITELLM_KEY}"
+       # Should return a model list including claude-sonnet-4-6
+
+  4. Install the local CA cert on each client device (see README.md § 'HTTPS / local CA trust'):
        traefik/certs/ca/rootCA.pem
-       (macOS: sudo security add-trusted-cert -d -r trustRoot \
-                  -k /Library/Keychains/System.keychain traefik/certs/ca/rootCA.pem)
 
-  4. Start services:
-       systemctl --user start traefik portainer registry openclaw
+  5. NemoClaw — runs OpenClaw inside an OpenShell sandbox (NVIDIA-backed, interactive wizard):
+       curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash
+       # Installer launches `nemoclaw onboard`. Choose:
+       #   Provider:   OpenAI-compatible
+       #   API key:    $(grep LITELLM_MASTER_KEY ~/home-lab/.secrets/litellm.env | cut -d= -f2)
+       #   Base URL:   http://localhost:4000/v1
+       #   Model:      claude-sonnet-4-6
+       # After onboard, access OpenClaw at http://127.0.0.1:18789
+       # or: nemoclaw <sandbox-name> connect && openclaw tui
 
-  5. First-time OpenClaw device pairing (after services start):
-       - Open https://openclaw.lab.lan in browser
-       - Enter token from openclaw/openclaw.env (OPENCLAW_GATEWAY_TOKEN)
-       - Approve device: podman exec --user node openclaw openclaw devices approve <requestId>
-       - Settings -> Gateway -> OpenShell -> URL: http://host.containers.internal:17670
+  6. Wire OpenShell inference routing to LiteLLM (one-time, after litellm is running):
+       LITELLM_KEY=$(grep LITELLM_MASTER_KEY ~/home-lab/.secrets/litellm.env | cut -d= -f2)
+       openshell provider create \
+           --name litellm-local --type openai \
+           --credential "OPENAI_API_KEY=${LITELLM_KEY}" \
+           --config OPENAI_BASE_URL=http://localhost:4000/v1
+       openshell inference set --no-verify --provider litellm-local --model claude-sonnet-4-6
+       openshell inference get   # confirm provider=litellm-local, model=claude-sonnet-4-6
 
-  6. First Claude Code sandbox (if not already created):
+  7. First claude-code sandbox (post-NemoClaw; uses inference.local):
        openshell sandbox create --name claude-code --no-auto-providers \
-           --policy openshell/policies/claude-code.yaml -- claude
+           --policy openshell/policies/claude-code.yaml \
+           --env ANTHROPIC_BASE_URL=https://inference.local \
+           --env ANTHROPIC_API_KEY=unused \
+           -- claude
+
+  NOTE: Any existing Podman-based OpenShell sandboxes are orphaned by the Docker
+  driver switch in step 8 above. Recreate them using `openshell sandbox create`.
+
 EOF

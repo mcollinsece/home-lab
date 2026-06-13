@@ -1,0 +1,124 @@
+# Docker Compose — homelab core services.
+# Runtime: Docker Engine (rootful) managed by systemd.
+#
+# Services: Traefik (reverse proxy), Portainer (Docker UI), Registry (image store), LiteLLM (inference proxy).
+# OpenClaw is managed by NemoClaw (not here) — it runs inside an OpenShell sandbox.
+#
+# Usage:
+#   docker compose -f ~/home-lab/docker/compose.yml up -d          # start all
+#   docker compose -f ~/home-lab/docker/compose.yml restart litellm # restart one
+#   docker compose -f ~/home-lab/docker/compose.yml logs -f litellm # tail logs
+#
+# Secrets are NOT stored here. Populate before first start:
+#   init-secrets       # writes .secrets/bedrock.env + .secrets/litellm.env
+#   cp litellm/litellm.env.example litellm/litellm.env
+#
+# Paths in this file are relative to the docker/ directory (this file's location).
+
+name: homelab
+
+networks:
+  ai-net:
+    # Explicit name overrides the "homelab_ai-net" default so Traefik's static config
+    # (providers.docker.network: ai-net) resolves correctly without any changes.
+    name: ai-net
+    driver: bridge
+
+volumes:
+  portainer-data:
+  registry-data:
+
+services:
+
+  # ---------- Traefik: reverse proxy + TLS termination -----------------------
+  traefik:
+    image: docker.io/traefik:v3.3
+    container_name: traefik
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Docker daemon socket for label-based service discovery.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Static config (entrypoints, dashboard, docker provider).
+      - ../traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      # Dynamic TLS config + wildcard cert (mkcert, expires 2028-09-13).
+      - ../traefik/tls.yml:/etc/traefik/tls.yml:ro
+      - ../traefik/certs:/etc/traefik/certs:ro
+    networks:
+      - ai-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dashboard.rule=Host(`traefik.lab.lan`)"
+      - "traefik.http.routers.dashboard.entrypoints=websecure"
+      - "traefik.http.routers.dashboard.tls=true"
+      - "traefik.http.routers.dashboard.service=api@internal"
+
+  # ---------- Portainer: Docker management UI --------------------------------
+  portainer:
+    image: docker.io/portainer/portainer-ce:lts
+    container_name: portainer
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer-data:/data
+    networks:
+      - ai-net
+    labels:
+      - "traefik.enable=true"
+      # Port must be declared: portainer listens on 9000, not 80.
+      - "traefik.http.services.portainer.loadbalancer.server.port=9000"
+
+  # ---------- Registry: local Docker image store -----------------------------
+  # Push: docker push registry.lab.lan:5000/<image>:<tag>
+  # Pull: docker pull registry.lab.lan:5000/<image>:<tag>
+  # Insecure (HTTP) on :5000 — configured in /etc/docker/daemon.json by setup-host.sh.
+  # LAN clients reach it via Traefik HTTPS at registry.lab.lan (after CA trust install).
+  registry:
+    image: docker.io/registry:2
+    container_name: registry
+    restart: unless-stopped
+    ports:
+      # Published so VM-local pushes resolve registry.lab.lan:5000 → 127.0.0.1.
+      # (The VM doesn't use AdGuard for DNS; /etc/hosts entry handles VM-side resolution.)
+      - "5000:5000"
+    volumes:
+      - registry-data:/var/lib/registry
+    networks:
+      - ai-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.services.registry.loadbalancer.server.port=5000"
+
+  # ---------- LiteLLM: unified inference proxy → Bedrock + future providers --
+  # Single credential boundary: Bedrock creds live ONLY here.
+  # OpenShell sandboxes reach inference via inference.local (gateway-routed to this).
+  # NemoClaw's OpenClaw sandbox is configured to use this as an OpenAI-compatible provider.
+  #
+  # Smoke-test after start:
+  #   curl http://localhost:4000/v1/models \
+  #     -H "Authorization: Bearer $(grep LITELLM_MASTER_KEY ~/home-lab/.secrets/litellm.env | cut -d= -f2)"
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: litellm
+    restart: unless-stopped
+    # Override CMD to load the model routing config (image default does not include --config).
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    ports:
+      # Published so the OpenShell gateway (host-side process) can reach LiteLLM at localhost:4000.
+      # Container-to-container traffic uses the ai-net container name (http://litellm:4000).
+      - "4000:4000"
+    volumes:
+      - ../litellm/config.yaml:/app/config.yaml:ro
+    env_file:
+      # Non-secret config (LITELLM_LOG etc). Copy from litellm.env.example.
+      - ../litellm/litellm.env
+      # Secrets — populated by init-secrets. Required before docker compose up.
+      - ../.secrets/litellm.env   # LITELLM_MASTER_KEY
+      - ../.secrets/bedrock.env   # AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION
+    networks:
+      - ai-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.services.litellm.loadbalancer.server.port=4000"

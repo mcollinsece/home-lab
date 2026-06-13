@@ -1,74 +1,108 @@
-# Traefik (rootless Podman, on the `homelab` VM)
+# Traefik (Docker Compose, on the `homelab` VM)
 
 Reverse proxy for LAN-facing services. Routing is **100% container labels** via the
-Podman socket — adding a service never touches `traefik.yml`.
+Docker socket — adding a service never touches `traefik.yml`.
 
-- **Entry:** `http://<name>.lab.lan` (HTTP only, no TLS)
-- **Dashboard:** `http://traefik.lab.lan/dashboard/`
+- **Entry:** `http://<name>.lab.lan` → permanent redirect to HTTPS
+- **HTTPS:** `https://<name>.lab.lan` — mkcert wildcard cert (`*.lab.lan`, expires 2028-09-13)
+- **Dashboard:** `https://traefik.lab.lan`
 - **Discovery:** `exposedByDefault=false` — only containers with `traefik.enable=true` are routed.
 
 ## Files
+
 | File | Role |
 |---|---|
-| `traefik.yml` | static config (entrypoint `:80`, Podman provider, dashboard) |
-| `traefik.container` | Quadlet unit; symlinked into `~/.config/containers/systemd/` |
-| `../networks/ai-net.network` | the shared bridge Traefik and apps sit on |
+| `traefik.yml` | static config (entrypoints :80/:443, Docker provider, dashboard) |
+| `tls.yml` | dynamic TLS config loaded by the file provider; sets wildcard cert as default |
+| `certs/` | mkcert wildcard cert + CA (keys gitignored via `*-key.pem`) |
+| `../docker/compose.yml` | defines the Traefik service (image, socket mount, ports, labels) |
 
-## Host prerequisites (already applied)
-```bash
-# rootless can bind :80
-echo 'net.ipv4.ip_unprivileged_port_start=80' | sudo tee /etc/sysctl.d/99-unprivileged-ports.conf
-sudo sysctl --system
-# Podman API socket for label discovery
-systemctl --user enable --now podman.socket
-```
+## Start / restart
 
-## Install / start
 ```bash
-ln -sf ~/home-lab/networks/ai-net.network  ~/.config/containers/systemd/ai-net.network
-ln -sf ~/home-lab/traefik/traefik.container ~/.config/containers/systemd/traefik.container
-systemctl --user daemon-reload
-systemctl --user start traefik.service
+# All services together
+docker compose -f ~/home-lab/docker/compose.yml up -d
+
+# Traefik only
+docker compose -f ~/home-lab/docker/compose.yml restart traefik
+
+# Logs
+docker compose -f ~/home-lab/docker/compose.yml logs -f traefik
 ```
 
 ## Expose a service
+
 Hostnames are derived from the **container name** via the provider's `defaultRule`
-(`Host(\`{{ normalize .Name }}.lab.lan\`)`). So the whole workflow is: put the
-container on `ai-net`, name it, and opt it in — no `Host(...)` rule needed.
+(`Host(\`{{ normalize .Name }}.lab.lan\`)`). The whole workflow is: put the container
+on `ai-net`, name it, and opt it in — no explicit `Host(...)` rule needed.
 
-```ini
-ContainerName=grafana          # REQUIRED in Quadlets — else name is `systemd-<unit>`
-Network=ai-net.network         #   → would resolve to systemd-grafana.lab.lan
-Label=traefik.enable=true
-# Label=traefik.http.services.grafana.loadbalancer.server.port=3000  # only if not :80
+**In a Docker Compose file:**
+```yaml
+services:
+  grafana:
+    container_name: grafana       # REQUIRED — hostname comes from this
+    networks: [ai-net]
+    labels:
+      - traefik.enable=true
+      # Only needed if the container doesn't listen on :80:
+      # - traefik.http.services.grafana.loadbalancer.server.port=3000
+
+networks:
+  ai-net:
+    external: true                # join the shared bridge; don't create a new one
 ```
-→ live at `http://grafana.lab.lan`.
+→ live at `https://grafana.lab.lan`.
 
-Need a non-default host (e.g. a path, multiple hosts)? An explicit label overrides
-`defaultRule`:
-```ini
-Label=traefik.http.routers.grafana.rule=Host(`metrics.lab.lan`)
+Need a custom host (e.g. a path, multiple hosts)? An explicit label overrides `defaultRule`:
+```yaml
+labels:
+  - traefik.http.routers.grafana.rule=Host(`metrics.lab.lan`)
 ```
-
-Then ensure AdGuard has `*.lab.lan → 192.168.0.51` (the linchpin — without it, names
-don't resolve for other clients).
 
 Verify without DNS:
 ```bash
-curl -H 'Host: grafana.lab.lan' http://localhost/
+curl -k -H 'Host: grafana.lab.lan' https://localhost/
 ```
 
-## Update / roll back
-Bump the tag in `traefik.container` (`Image=docker.io/traefik:v3.x`), then:
-```bash
-systemctl --user daemon-reload && systemctl --user restart traefik.service
+## NemoClaw / static routes
+
+NemoClaw-managed containers don't get Docker labels. Route them via the file provider
+instead — add a file to the `traefik/` directory (Traefik watches it and hot-reloads):
+
+```yaml
+# traefik/openclaw-nemoclaw.yml
+http:
+  routers:
+    openclaw:
+      rule: "Host(`openclaw.lab.lan`)"
+      entrypoints: [websecure]
+      tls: {}
+      service: openclaw
+  services:
+    openclaw:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:18789"
 ```
 
-## Teardown (clean)
+No restart needed — Traefik hot-reloads file provider changes.
+
+## Update Traefik
+
+Bump the image tag in `docker/compose.yml` (`image: docker.io/traefik:v3.x`), then:
 ```bash
-systemctl --user disable --now traefik.service
-rm ~/.config/containers/systemd/traefik.container ~/.config/containers/systemd/ai-net.network
-systemctl --user daemon-reload
-podman network rm ai-net          # optional
-podman rmi docker.io/traefik:v3.3 # optional
+docker compose -f ~/home-lab/docker/compose.yml pull traefik
+docker compose -f ~/home-lab/docker/compose.yml up -d traefik
 ```
+
+## Regenerate the wildcard cert
+
+```bash
+CAROOT=~/home-lab/traefik/certs/ca mkcert \
+  -cert-file ~/home-lab/traefik/certs/_wildcard.lab.lan.pem \
+  -key-file  ~/home-lab/traefik/certs/_wildcard.lab.lan-key.pem \
+  "*.lab.lan"
+docker compose -f ~/home-lab/docker/compose.yml restart traefik
+```
+
+Clients don't need to reinstall the CA — only the leaf cert changed.

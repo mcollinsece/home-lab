@@ -32,7 +32,7 @@ providers:
     filename: /etc/traefik/tls.yml
     watch: true
   docker:
-    # Podman's rootless socket, bind-mounted to the docker-compatible path.
+    # Docker Engine socket (rootful daemon, mounted ro in docker/compose.yml).
     endpoint: "unix:///var/run/docker.sock"
     exposedByDefault: false # opt-in: only containers with `traefik.enable=true` are routed
     network: ai-net         # the network Traefik uses to reach discovered containers
