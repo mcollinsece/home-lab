@@ -91,6 +91,13 @@ else
   echo "         (check: ss -tlnp | grep 17670  should be 0.0.0.0:17670, not 127.0.0.1)" >&2
 fi
 
+# ---- 7. CLI tools (osbox — PATH-resident sandbox helper) -----------------
+say "CLI tools -> ~/.local/bin"
+mkdir -p "$HOME/.local/bin"
+chmod +x "$REPO_DIR/bootstrap/osbox"
+ln -sfn "$REPO_DIR/bootstrap/osbox" "$HOME/.local/bin/osbox"
+echo "osbox -> $HOME/.local/bin/osbox"
+
 say "Done. Next (see docs/current/todos.md):"
 cat <<'EOF'
   - openshell sandbox create --name claude-code --no-auto-providers \
