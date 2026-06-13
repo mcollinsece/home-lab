@@ -3,55 +3,70 @@
 See [platform.md](platform.md) for current state and
 [../future/ai-dev-ground.md](../future/ai-dev-ground.md) for the overall arc.
 
-## Critical / unblockers
+## Phase 4 — OpenClaw + secrets management
 
-- [ ] **Document/script secrets re-creation** from password manager for a clean-host
-      rebuild. Two stores: (a) Podman secrets for quadlet services (none yet);
-      (b) sandbox-resident creds — `claude login` (OAuth, interactive only) and
-      `~/.secrets/bedrock.env` (AWS Bedrock keys). A snapshot revert wipes both.
+OpenClaw is a Claude Code variant built for persistent, always-on assistant use.
+The design principle: **OpenShell is the single control plane for all agents.**
+OpenClaw runs as an OpenShell BYOC sandbox — not a raw Podman container — so it
+gets the same policy enforcement, exec dispatch, and lifecycle management as every
+other agent. Quadlet handles one narrow job: calling `osbox` on boot so the sandbox
+exists after a reboot.
 
-- [ ] **(Optional) Clean snapshot-revert reproducibility test.** Idempotent re-run was
-      verified 2026-06-12 but a true from-zero rebuild was never tested. Safe because a
-      working snapshot is the rollback target. Runbook:
-      [../../bootstrap/TROUBLESHOOTING.md](../../bootstrap/TROUBLESHOOTING.md).
+**Architecture:**
+- `osbox openclaw --claudeai --headless` creates a headless sandbox from the OpenClaw
+  BYOC image. The Podman container persists after the setup script exits; the sandbox
+  stays `Ready` for `openshell sandbox exec` dispatch.
+- A systemd unit (`openclaw-start.service`, `Type=oneshot`) runs `osbox` idempotently
+  at boot — skip creation if the sandbox is already registered. Reboots covered;
+  OpenShell stays the authoritative registry.
+- `osbox` needs a `--if-not-exists` guard (or name-collision detection) so the boot
+  service is safe to run repeatedly without error.
 
-## Phase 4 — OpenClaw (always-on assistant)
+**Secrets manager** — replaces the manual `.secrets/` file pattern with something
+that survives a clean rebuild without manual copy-paste from a password manager:
+- Evaluate **Podman secrets** (`podman secret create`) — already available, integrates
+  with Quadlet via `Secret=` in container units. Simple; no extra tooling.
+- Evaluate **SOPS + age** — encrypt secrets in git, decrypt with a key from the
+  password manager. Survives a repo clone; `.age` extension already gitignored.
+- Decision drives how `osbox --bedrock`, `--codex`, `--gemini` source keys going
+  forward. Pick one and migrate `~/.secrets/bedrock.env` to it.
 
-OpenClaw is a Claude Code variant designed for persistent assistant use. Goal: run it
-as an always-on BYOC container on Podman with a Quadlet restart policy so it survives
-reboots. The local registry is pre-work needed before any BYOC image.
-
+**Work items:**
 - [ ] **Local image registry** — `registry/registry.container` Quadlet + Traefik route
-      at `registry.lab.lan`. Required before building or pulling BYOC/project images.
-- [ ] **Pull/build OpenClaw image** and push to local registry (`:5000`).
-- [ ] **`openshell/policies/openclaw.yaml`** — egress policy for OpenClaw. Likely
-      broader than `claude-code.yaml` (may need package registries, etc.).
-- [ ] **`openclaw/openclaw.container`** Quadlet unit — BYOC image, restart policy,
-      volume for persistent state.
-- [ ] **Auth** — `osbox --claudeai` pattern or direct volume-mount of `~/.claude/`
-      depending on how OpenClaw resolves credentials.
-- [ ] **Verify** `systemctl --user start openclaw` → always-on, survives reboot.
+      at `registry.lab.lan`. Required before pulling or building BYOC images.
+- [ ] **OpenClaw BYOC image** — pull/build and push to local registry (`:5000`).
+      Define `openshell/policies/openclaw.yaml` (egress scope TBD from OpenClaw docs).
+- [ ] **`osbox` idempotency** — add name-collision detection: if sandbox already exists,
+      print status and exit 0. Makes the boot service safe to repeat.
+- [ ] **`openclaw-start.service`** systemd unit — `Type=oneshot`, calls
+      `osbox openclaw --claudeai --headless`; wired to `openshell-gateway.service`
+      via `After=`/`Wants=` so it fires once the gateway is up.
+- [ ] **Secrets manager** — pick Podman secrets vs SOPS+age; migrate `bedrock.env`;
+      document re-creation procedure for a clean-host rebuild (replaces the manual
+      `.secrets/` step that currently requires a password manager copy-paste).
+- [ ] **Verify** sandbox survives a gateway restart and a full reboot; confirm
+      `openshell sandbox exec -n openclaw -- openclaw -p "task"` dispatches correctly.
 
 ## Phase 5 — Codex sandbox
 
-Add Codex CLI (OpenAI) as a first-class `osbox`-managed sandbox agent.
+Add OpenAI Codex CLI as a first-class `osbox`-managed agent.
 
 - [ ] **`openshell/policies/codex.yaml`** — egress policy for OpenAI API endpoints.
-- [ ] **`--codex` flag for `osbox`** — sets `AGENT_CMD=codex`, injects `OPENAI_API_KEY`
-      from `~/.secrets/codex.env`, clones host `~/.codex/` state if present.
+- [ ] **`--codex` flag for `osbox`** — sets `AGENT_CMD=codex`, sources `OPENAI_API_KEY`
+      via the secrets manager chosen in Phase 4, clones `~/.codex/` state if present.
       The `AGENT_CMD` hook is already wired — this is mostly a credential + policy block.
 - [ ] **`openshell/project-settings/codex-test.json`** — committed non-secret opt-in
-      settings for a test project (mirrors `bedrock-test.json` pattern).
+      settings (mirrors `bedrock-test.json` pattern).
 - [ ] **Verify** `osbox codex-1 --codex --headless` → dispatch
       `openshell sandbox exec -n codex-1 -- codex -p "task"`.
 
 ## Phase 6 — Gemini CLI sandbox
 
-Add Gemini CLI as a sandboxed agent via the same `osbox` pattern.
+Add Google Gemini CLI as a sandboxed agent via the same `osbox` pattern.
 
 - [ ] **`openshell/policies/gemini.yaml`** — egress for Gemini API / GCP endpoints.
 - [ ] **`--gemini` flag for `osbox`** — sets `AGENT_CMD=gemini`, injects GCP
-      application-default credentials or `GOOGLE_API_KEY` from `~/.secrets/gemini.env`.
+      application-default credentials or `GOOGLE_API_KEY` via secrets manager.
 - [ ] **`openshell/project-settings/gemini-test.json`**.
 - [ ] **Verify** `osbox gemini-1 --gemini --headless` → dispatch
       `openshell sandbox exec -n gemini-1 -- gemini -p "task"`.
@@ -59,7 +74,8 @@ Add Gemini CLI as a sandboxed agent via the same `osbox` pattern.
 ## Phase 7 — NemoClaw + NeMo Agent Toolkit
 
 - [ ] **NemoClaw** — deferred Docker service. Evaluate whether Podman can replace the
-      Docker dependency before committing to a design.
-- [ ] **NeMo Agent Toolkit orchestration** — multi-agent pipeline wiring; design TBD
-      once Phases 4–6 agents are stable and the director/worker pattern is proven
-      across Claude, Codex, and Gemini workers.
+      Docker dependency before committing to a design. If Podman works, run as an
+      OpenShell BYOC sandbox to keep it on the same control plane as other agents.
+- [ ] **NeMo Agent Toolkit orchestration** — multi-agent pipeline wiring across Claude,
+      Codex, and Gemini workers. Design TBD once Phases 4–6 agents are stable and the
+      director/worker dispatch pattern is proven at scale.
