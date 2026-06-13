@@ -184,6 +184,7 @@ else
 {
   "gateway": {
     "mode": "local",
+    "trustedProxies": ["10.89.0.0/24"],
     "controlUi": {
       "allowedOrigins": [
         "http://localhost:18789",
@@ -212,6 +213,10 @@ OCJSON
 fi
 
 # ---- 11. OpenClaw custom image (bakes claude + openshell CLIs) ------------
+# The image sets USER root so entrypoint.sh can chmod .credentials.json to 644
+# before dropping to the node user via runuser. This is a rootless Podman uid-
+# namespace workaround (container uid 0 = host uid 1000 = debian). Phase 8
+# tracks the clean fix: --userns=keep-id + USER node.
 say "OpenClaw custom image"
 if podman image exists registry.lab.lan/openclaw:latest 2>/dev/null; then
   echo "registry.lab.lan/openclaw:latest present — skipping build"
@@ -267,7 +272,7 @@ cat <<'EOF'
   5. First-time OpenClaw device pairing (after services start):
        - Open https://openclaw.lab.lan in browser
        - Enter token from openclaw/openclaw.env (OPENCLAW_GATEWAY_TOKEN)
-       - Approve device: podman exec openclaw openclaw devices approve <requestId>
+       - Approve device: podman exec --user node openclaw openclaw devices approve <requestId>
        - Settings -> Gateway -> OpenShell -> URL: http://host.containers.internal:17670
 
   6. First Claude Code sandbox (if not already created):

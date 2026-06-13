@@ -65,6 +65,23 @@
 | `claude-code` sandbox | OpenShell sandbox | dual-auth: subscription (default) + Bedrock Sonnet 4.6 per-project | ✅ |
 | OpenClaw | Podman Quadlet | `https://openclaw.lab.lan` — agent director; claude-cli primary, Bedrock fallback | ✅ |
 
+> **LiteLLM proxy (Phase 4.5 — not yet deployed):** A LiteLLM Quadlet will sit between
+> OpenClaw / OpenShell sandboxes and the actual model backends (AWS Bedrock, OpenAI,
+> Gemini). OpenClaw keeps its `claude-cli` backend for subscription traffic; all
+> pay-per-token backends route through LiteLLM's single OpenAI-compatible endpoint at
+> `http://litellm:4000` (exposed externally as `https://litellm.lab.lan`). The full
+> architecture spec, config.yaml, and Quadlet design live in
+> [litellm-proxy.md](litellm-proxy.md).
+
+> **OpenClaw container user model:** The image sets `USER root` so that `entrypoint.sh`
+> can `chmod 644` the host-mounted `.credentials.json` and `.claude.json` at container
+> startup (in rootless Podman, container root = host `debian` uid 1000, so ownership is
+> correct). The entrypoint then immediately drops to the `node` user via
+> `runuser -u node -- tini -s -- node openclaw.mjs gateway` — the OpenClaw process itself
+> runs as `node`. This is a workaround for the rootless Podman uid-namespace mapping
+> (container uid 1000 ≠ host uid 1000 without `--userns=keep-id`). A cleaner fix using
+> `--userns=keep-id` is tracked in [todos.md](todos.md) under Phase 8.
+
 > **OpenShell config note:** the gateway must bind `0.0.0.0:17670` (not the default `127.0.0.1`) so sandbox containers can reach it over the host bridge. Driver + bind live in [`openshell/gateway.env`](../../openshell/gateway.env), symlinked to `~/.config/openshell/gateway.env` by `setup-host.sh`. mTLS gates the wider bind. `openshell doctor check` falsely errors on Docker even when Podman is active — cosmetic.
 
 ### HTTPS / TLS
@@ -187,11 +204,13 @@ Manual steps after `setup-host.sh` (tracked in [todos.md](todos.md)):
 Outstanding work lives in **[todos.md](todos.md)**. Current state:
 
 - ✅ Phase 1 (Node 22) · Phase 2 (OpenShell + Claude Code subscription) · `setup-host.sh` · AdGuard `*.lab.lan` · Phase 3 (Bedrock dual-auth)
-- ✅ Phase 4 — OpenClaw live at `https://openclaw.lab.lan` (claude-cli + Bedrock, Traefik HTTPS, device pairing complete); 2 items remain (OpenShell backend wiring, Bedrock model verification)
+- ✅ Phase 4 — OpenClaw live at `https://openclaw.lab.lan`; claude-cli backend working; Traefik HTTPS + device pairing confirmed. Remaining: OpenShell backend wiring in UI.
+- ⬜ Phase 4.5 — LiteLLM proxy Quadlet; Bedrock + future provider routing; toggle mechanism for OpenClaw + sandboxes. See [litellm-proxy.md](litellm-proxy.md).
+- ⬜ Phase 8 — OpenClaw rootless credential access (`--userns=keep-id`, revert `USER root`/entrypoint.sh)
 - ⬜ Phase 5 — Codex CLI sandbox (`osbox --codex`)
 - ⬜ Phase 6 — Gemini CLI sandbox (`osbox --gemini`)
 - ⬜ Phase 7 — NemoClaw + NeMo Agent Toolkit orchestration
-- ⬜ Phase 8 — Alternative providers (OpenAI, Grok, Gemini CLI, Copilot, OpenRouter)
+- ⬜ Phase 9 — Alternative providers (OpenAI, Grok, Gemini CLI, Copilot, OpenRouter)
 
 ---
 

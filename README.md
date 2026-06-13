@@ -50,10 +50,11 @@ decides what it's allowed to reach.
 | Claude Code sandbox — Max/Pro subscription | ✅ live |
 | Per-project subscription ↔ **Bedrock** dual-auth | ✅ live (Phase 3) |
 | **OpenClaw** director — claude-cli primary, Bedrock fallback | ✅ live (Phase 4) |
+| OpenClaw rootless credential access (`--userns=keep-id`, no `USER root`) | ☐ roadmap (Phase 8) |
 | Codex CLI sandbox | ☐ roadmap (Phase 5) |
 | Gemini CLI sandbox | ☐ roadmap (Phase 6) |
 | NemoClaw + NeMo Agent Toolkit orchestration | ☐ roadmap (Phase 7) |
-| Alternative providers (OpenAI, Grok, Gemini, Copilot, OpenRouter) | ☐ roadmap (Phase 8) |
+| Alternative providers (OpenAI, Grok, Gemini, Copilot, OpenRouter) | ☐ roadmap (Phase 9) |
 | k3s + vLLM on a second node | ☐ roadmap |
 
 Full vision, phases, and the k8s roadmap: **[docs/future/ai-dev-ground.md](docs/future/ai-dev-ground.md)**.

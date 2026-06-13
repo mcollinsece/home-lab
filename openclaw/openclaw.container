@@ -36,11 +36,13 @@ Volume=openclaw-state.volume:/home/node/.openclaw
 # Runtime config (non-secret). Copy openclaw.env.example to openclaw.env and fill in.
 EnvironmentFile=%h/home-lab/openclaw/openclaw.env
 
-# Claude CLI credentials — mount host ~/.claude so the bundled claude-cli backend
-# can reuse the existing `claude login` session (no API key needed).
+# Claude CLI credentials — mount host ~/.claude and ~/.claude.json so the bundled
+# claude-cli backend can reuse the existing `claude login` session (no API key needed).
 # OpenClaw invokes `claude -p` (non-interactive); Anthropic has sanctioned this usage.
-# Note: uid inside the container must match host uid 1000 (debian) for read access.
+# Container runs as root (= host uid 1000/debian in rootless Podman) so both files
+# are readable despite their 600 permissions.
 Volume=/home/debian/.claude:/home/node/.claude:z
+Volume=/home/debian/.claude.json:/home/node/.claude.json:z
 
 # AWS Bedrock credentials — fallback provider if claude-cli is unavailable.
 # OpenClaw auto-detects these and enables the implicit Bedrock provider.

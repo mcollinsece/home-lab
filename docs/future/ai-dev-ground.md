@@ -240,22 +240,19 @@ How a sandbox gets its auth matters once there's more than one. Established
 
 ## Phase 4 — OpenClaw director + local registry + secrets manager
 
-**Infrastructure committed ✅ — manual finish-up steps pending (see [todos.md](../current/todos.md)).**
+**Live ✅ (2026-06-13) — claude-cli backend working; 2 items remain (see [todos.md](../current/todos.md)).**
 
 OpenClaw's native design (per `docs.openclaw.ai`) is to run **outside** OpenShell as a host-side director. It calls `openshell sandbox create` to provision worker sandboxes, retrieves SSH connection details via `openshell sandbox ssh-config`, and connects into those sandboxes over SSH to dispatch tasks. The director must sit outside the sandbox environment — a sandbox cannot orchestrate other sandboxes through the same gateway.
 
-Architecture: OpenClaw runs as a rootless Podman **Quadlet** (`openclaw.container`) on `ai-net`, exposed at `openclaw.lab.lan` via Traefik. It holds an `ANTHROPIC_API_KEY` Podman secret and calls the OpenShell gateway at `http://host.containers.internal:17670` to spawn and manage worker sandboxes (Claude Code, Codex, Gemini).
+Architecture: OpenClaw runs as a rootless Podman **Quadlet** (`openclaw.container`) on `ai-net`, exposed at `openclaw.lab.lan` via Traefik. It holds Bedrock AWS credentials via Podman secrets and calls the OpenShell gateway at `http://host.containers.internal:17670` to spawn and manage worker sandboxes (Claude Code, Codex, Gemini).
 
-A custom image (`openclaw/Containerfile`) bakes the `openshell` CLI in so OpenClaw can issue `openshell sandbox create/exec` commands directly. The registry Quadlet (`registry.lab.lan`) stores it locally.
+A custom image (`openclaw/Containerfile`) bakes the Claude Code CLI and `openshell` CLIs in. The image sets `USER root` and uses `entrypoint.sh` to `chmod 644` the host-mounted `~/.claude` credentials before dropping to the `node` user via `runuser`. This is a workaround for rootless Podman's uid-namespace mapping — see Phase 8 for the clean fix. The registry Quadlet (`registry.lab.lan`) stores the image locally.
 
-**Built in this phase:** `openclaw.container`, `openclaw-state.volume`, `Containerfile`, `registry.container`, `bootstrap/init-secrets.sh`, `osbox` idempotency.
+**Built in this phase:** `openclaw.container`, `openclaw-state.volume`, `Containerfile`, `entrypoint.sh`, `registry.container`, `bootstrap/init-secrets.sh`, `osbox` idempotency.
 
-**Manual finish-up (tracked in [todos.md](../current/todos.md)):**
-1. `init-secrets` — create Podman secrets + `.secrets/bedrock.env`
-2. `cp openclaw/openclaw.env.example openclaw/openclaw.env`
-3. `systemctl --user start openclaw`
-4. Configure OpenShell backend in the OpenClaw UI at `http://openclaw.lab.lan` → Settings → Gateway → OpenShell → `http://host.containers.internal:17670`
-5. Build and push custom image: `podman build -t registry.lab.lan/openclaw:latest openclaw/ && podman push --tls-verify=false registry.lab.lan/openclaw:latest`, then update `Image=` in `openclaw.container` and restart
+**Remaining (tracked in [todos.md](../current/todos.md)):**
+- Configure OpenShell backend in the OpenClaw UI → Settings → Gateway → OpenShell → `http://host.containers.internal:17670`
+- Fix Bedrock model ID: `model_not_found` on `us.anthropic.claude-sonnet-4-6`; needs the full versioned inference-profile ARN
 
 ## Phase 5 — Codex CLI sandbox
 
@@ -309,6 +306,27 @@ pip install nvidia-nat   # check repo for current package name
 - Define workflows in YAML/Python routing tasks across agents.
 - Use **MCP** to expose tools to/from sandboxes, **A2A** to delegate between agents.
 - Pattern: NeMo Agent Toolkit as planner/router → dispatches tasks into Claude Code / Codex / Gemini sandboxes → OpenShell enforces what each can touch.
+
+## Phase 8 — OpenClaw rootless credential access
+
+**Goal:** eliminate the `USER root` + `entrypoint.sh chmod` workaround so credentials stay at mode 600 on the host.
+
+**Root cause:** In rootless Podman, container uid 0 (root) = host uid 1000 (debian). The `node` user at container uid 1000 maps to a sub-uid on the host (~uid 101000) and cannot read 600-mode files owned by debian. The current workaround chmods the files to 644 at startup.
+
+**Preferred fix — `--userns=keep-id`:**
+Add `PodmanArgs=--userns=keep-id` to `openclaw.container`. This maps container uid 1000 (`node`) to host uid 1000 (`debian`) directly, so `node` can read 600-mode credential files. Steps:
+1. Stop openclaw: `systemctl --user stop openclaw`
+2. Re-chown the state volume to the new uid mapping:
+   ```bash
+   STATE=$(podman volume inspect systemd-openclaw-state --format '{{.Mountpoint}}')
+   podman unshare chown -R 1000:1000 "$STATE"
+   ```
+3. Add `PodmanArgs=--userns=keep-id` to `[Container]` in `openclaw.container`
+4. Revert `Containerfile` to end with `USER node` (remove `USER root`, `COPY entrypoint.sh`, `ENTRYPOINT`, `CMD`)
+5. Remove `openclaw/entrypoint.sh`
+6. Rebuild, push, start
+
+**Alternative:** POSIX ACLs — `setfacl -m u:$(podman unshare id -u node):r ~/.claude/.credentials.json ~/.claude.json`. No uid remapping needed, but requires `acl` package and doesn't help with files written by future OpenClaw runs.
 
 ---
 
@@ -407,10 +425,12 @@ When you add a second/third Optiplex:
 3. [x] Phase 3: Subscription ↔ Bedrock per-project switching — **complete** —
    policy v2 (Bedrock egress), us-east-1, default `us.anthropic.claude-sonnet-4-6`;
    both paths verified via `claude -p` (Bedrock from project dir, subscription elsewhere)
-4. [~] Phase 4: OpenClaw director Quadlet + local registry + secrets manager — infra committed ✅; `init-secrets`, `openclaw.env`, start + configure OpenClaw ⬜
+4. [x] Phase 4: OpenClaw director Quadlet + local registry + secrets manager — **live 2026-06-13**. claude-cli backend working; Traefik HTTPS + device pairing confirmed. Remaining: OpenShell backend UI wiring; Bedrock model ID fix.
 5. [ ] Phase 5: Codex CLI sandbox (`osbox --codex`)
 6. [ ] Phase 6: Gemini CLI sandbox (`osbox --gemini`, BYOC)
 7. [ ] Phase 7: NemoClaw experiment (deferred; the one Docker service) + NeMo Agent Toolkit orchestration
+8. [ ] Phase 8: OpenClaw rootless credential access — `--userns=keep-id` + revert `USER root`/entrypoint.sh
+9. [ ] Phase 9: Alternative providers (OpenAI, Grok, Gemini CLI, Copilot, OpenRouter)
 
 ---
 
