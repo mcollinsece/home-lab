@@ -58,14 +58,48 @@
 | Service | Type | Address | Status |
 |---|---|---|---|
 | `ai-net` | Podman bridge network | internal | ✅ |
-| Traefik | Podman Quadlet | label-discovery via `podman.sock`, port `:80` | ✅ |
-| Portainer | Podman Quadlet | `portainer.lab.lan` | ✅ |
+| Traefik | Podman Quadlet | label-discovery via `podman.sock`, ports `:80` (→ HTTPS redirect) + `:443` (TLS) | ✅ |
+| Portainer | Podman Quadlet | `https://portainer.lab.lan` | ✅ |
 | Registry | Podman Quadlet | `registry.lab.lan` — Docker Registry v2 | ✅ |
 | OpenShell gateway | systemd `--user` service | `0.0.0.0:17670` (mTLS), Podman driver | ✅ |
 | `claude-code` sandbox | OpenShell sandbox | dual-auth: subscription (default) + Bedrock Sonnet 4.6 per-project | ✅ |
-| OpenClaw | Podman Quadlet | `openclaw.lab.lan` — agent director; orchestrates OpenShell worker sandboxes | ⬜ pending `init-secrets` + `openclaw.env` |
+| OpenClaw | Podman Quadlet | `https://openclaw.lab.lan` — agent director; claude-cli primary, Bedrock fallback | ✅ |
 
 > **OpenShell config note:** the gateway must bind `0.0.0.0:17670` (not the default `127.0.0.1`) so sandbox containers can reach it over the host bridge. Driver + bind live in [`openshell/gateway.env`](../../openshell/gateway.env), symlinked to `~/.config/openshell/gateway.env` by `setup-host.sh`. mTLS gates the wider bind. `openshell doctor check` falsely errors on Docker even when Podman is active — cosmetic.
+
+### HTTPS / TLS
+
+All `*.lab.lan` traffic is served over HTTPS. Traefik terminates TLS using a
+[mkcert](https://github.com/FiloSottile/mkcert) wildcard cert signed by a local CA.
+HTTP requests on `:80` are permanently redirected to HTTPS on `:443`.
+
+| Artifact | Path in repo | Notes |
+|---|---|---|
+| Wildcard cert | `traefik/certs/_wildcard.lab.lan.pem` | expires 2028-09-13 |
+| Wildcard key | `traefik/certs/_wildcard.lab.lan-key.pem` | gitignored (`*-key.pem`) |
+| CA cert (public) | `traefik/certs/ca/rootCA.pem` | safe to commit; install on each client |
+| CA key | `traefik/certs/ca/rootCA-key.pem` | gitignored |
+| Dynamic TLS config | `traefik/tls.yml` | loaded by Traefik file provider; sets cert as default |
+
+**Regenerate cert** (when it expires or if the CA is rotated):
+
+```bash
+CAROOT=traefik/certs/ca mkcert \
+  -cert-file traefik/certs/_wildcard.lab.lan.pem \
+  -key-file  traefik/certs/_wildcard.lab.lan-key.pem \
+  "*.lab.lan"
+systemctl --user restart traefik
+```
+
+**Install the CA on each client device** — one-time, per machine. Pull `rootCA.pem`
+from git or scp it from the server, then:
+
+- **macOS:** `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain rootCA.pem`
+- **Windows (Admin PowerShell):** `Import-Certificate -FilePath rootCA.pem -CertStoreLocation Cert:\LocalMachine\Root`
+- **Linux:** `sudo cp rootCA.pem /usr/local/share/ca-certificates/lab-lan-ca.crt && sudo update-ca-certificates`
+
+Firefox on Linux also requires a manual import: Settings → Privacy & Security →
+Certificates → View Certificates → Authorities → Import.
 
 ### CLI tools (PATH-resident, in `~/.local/bin`)
 
@@ -138,6 +172,8 @@ Manual steps after `setup-host.sh` (tracked in [todos.md](todos.md)):
 - `claude login` (interactive OAuth — cannot be scripted)
 - `systemctl --user start openclaw`
 - Configure OpenShell backend in OpenClaw UI
+- Generate mkcert CA + wildcard cert (see HTTPS / TLS section above)
+- Install CA cert on each client device
 
 > **Verified 2026-06-12:** idempotent re-run confirmed — Node 22, OpenShell `v0.0.62`,
 > gateway + `podman.socket` active, `driver=podman`, bind `0.0.0.0:17670`, `Connected`.
@@ -150,11 +186,12 @@ Manual steps after `setup-host.sh` (tracked in [todos.md](todos.md)):
 
 Outstanding work lives in **[todos.md](todos.md)**. Current state:
 
-- ⬜ Phase 4 finish-up — `init-secrets`, `openclaw.env`, start OpenClaw, configure gateway, custom image build
+- ✅ Phase 1 (Node 22) · Phase 2 (OpenShell + Claude Code subscription) · `setup-host.sh` · AdGuard `*.lab.lan` · Phase 3 (Bedrock dual-auth)
+- ✅ Phase 4 — OpenClaw live at `https://openclaw.lab.lan` (claude-cli + Bedrock, Traefik HTTPS, device pairing complete); 2 items remain (OpenShell backend wiring, Bedrock model verification)
 - ⬜ Phase 5 — Codex CLI sandbox (`osbox --codex`)
 - ⬜ Phase 6 — Gemini CLI sandbox (`osbox --gemini`)
 - ⬜ Phase 7 — NemoClaw + NeMo Agent Toolkit orchestration
-- ✅ Phase 1 (Node 22) · Phase 2 (OpenShell + Claude Code subscription) · `setup-host.sh` · AdGuard `*.lab.lan` · Phase 3 (Bedrock dual-auth) · Phase 4 infra (registry, OpenClaw Quadlet, `osbox`, `init-secrets`)
+- ⬜ Phase 8 — Alternative providers (OpenAI, Grok, Gemini CLI, Copilot, OpenRouter)
 
 ---
 

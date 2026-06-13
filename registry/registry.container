@@ -17,7 +17,11 @@ ContainerName=registry
 Image=docker.io/registry:2
 Network=ai-net.network
 Volume=registry-data.volume:/var/lib/registry
-# Traefik: name-derived route -> registry.lab.lan
+# Publish to host so `podman push registry.lab.lan/...` works from the VM itself.
+# The VM doesn't use AdGuard for DNS, so registry.lab.lan must be in /etc/hosts
+# (127.0.0.1 registry.lab.lan) for host-side pushes/pulls to resolve.
+PublishPort=5000:5000
+# Traefik: name-derived route -> registry.lab.lan (for LAN clients via AdGuard)
 # Port must be declared: registry listens on 5000, not 80.
 Label=traefik.enable=true
 Label=traefik.http.services.registry.loadbalancer.server.port=5000

@@ -47,18 +47,18 @@ printf '%s' "$AWS_SECRET_ACCESS_KEY" | podman secret create --replace bedrock_aw
 printf '%s' "$AWS_REGION"            | podman secret create --replace bedrock_aws_region             - >/dev/null
 ok "Podman secrets: bedrock_aws_{access_key_id,secret_access_key,region}  (for Quadlet containers)"
 
-# ---- Anthropic API key (Phase 4 — OpenClaw Quadlet) -----------------------
-say "Anthropic API key"
-printf '  Source: console.anthropic.com → API keys\n'
-printf '  Used by: OpenClaw Quadlet (Secret=anthropic_api_key in openclaw.container)\n'
-printf '  Leave blank to skip.\n'
+# ---- Anthropic API key (optional — only if using direct API instead of claude-cli) ----
+say "Anthropic API key (optional)"
+printf '  OpenClaw defaults to the claude-cli backend (host claude login, no key needed).\n'
+printf '  Only needed if you want direct Anthropic API access as the primary provider.\n'
+printf '  Source: console.anthropic.com → API keys. Leave blank to skip.\n'
 ask_secret "ANTHROPIC_API_KEY" ANTHROPIC_API_KEY
 
 if [[ -n "${ANTHROPIC_API_KEY}" ]]; then
   printf '%s' "$ANTHROPIC_API_KEY" | podman secret create --replace anthropic_api_key - >/dev/null
   ok "Podman secret: anthropic_api_key"
 else
-  skip "no key entered"
+  skip "no key entered — using claude-cli backend (claude login credentials)"
 fi
 
 # ---- Summary ---------------------------------------------------------------

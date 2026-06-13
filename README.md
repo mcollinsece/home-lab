@@ -45,11 +45,15 @@ decides what it's allowed to reach.
 | Capability | State |
 |---|---|
 | Reverse proxy + dashboards (Traefik, Portainer) on `*.lab.lan` | ✅ live |
+| Traefik HTTPS — mkcert wildcard cert for `*.lab.lan` | ✅ live |
 | OpenShell gateway on rootless Podman, deny-by-default sandboxes | ✅ live |
 | Claude Code sandbox — Max/Pro subscription | ✅ live |
 | Per-project subscription ↔ **Bedrock** dual-auth | ✅ live (Phase 3) |
-| Codex + Gemini CLI sandboxes | ☐ roadmap (Phase 4) |
-| Always-on **OpenClaw** assistant | ☐ roadmap (Phase 5) |
+| **OpenClaw** director — claude-cli primary, Bedrock fallback | ✅ live (Phase 4) |
+| Codex CLI sandbox | ☐ roadmap (Phase 5) |
+| Gemini CLI sandbox | ☐ roadmap (Phase 6) |
+| NemoClaw + NeMo Agent Toolkit orchestration | ☐ roadmap (Phase 7) |
+| Alternative providers (OpenAI, Grok, Gemini, Copilot, OpenRouter) | ☐ roadmap (Phase 8) |
 | k3s + vLLM on a second node | ☐ roadmap |
 
 Full vision, phases, and the k8s roadmap: **[docs/future/ai-dev-ground.md](docs/future/ai-dev-ground.md)**.
@@ -66,8 +70,9 @@ Internet
     ├── 192.168.0.50  Proxmox host (Dell OptiPlex 7050 Micro)
     │     ├── 192.168.0.53  AdGuard Home (LXC) — DHCP + DNS + *.lab.lan wildcard
     │     └── 192.168.0.51  homelab VM (Debian 13) — primary workload host
-    │           ├── Traefik (Podman Quadlet) — reverse proxy, label-based routing
+    │           ├── Traefik (Podman Quadlet) — reverse proxy :80/:443, label-based routing
     │           ├── Portainer (Podman Quadlet) — portainer.lab.lan
+    │           ├── OpenClaw (Podman Quadlet) — openclaw.lab.lan (agent director)
     │           ├── OpenShell gateway (systemd --user) — :17670, deny-by-default
     │           │     └── agent sandboxes (Podman) — outbound-only, per-agent policy
     │           └── projects/ — one Quadlet per service on ai-net
@@ -75,8 +80,60 @@ Internet
 ```
 
 `*.lab.lan` names resolve via AdGuard's wildcard rewrite (`*.lab.lan → 192.168.0.51`);
-Traefik routes per-service by container label. Agent sandboxes are **outbound-only**
-— they make API calls out, nothing routes in, so they need no Traefik entry.
+Traefik routes per-service by container label. All traffic is served over HTTPS — see
+[HTTPS / local CA trust](#https--local-ca-trust) below. Agent sandboxes are
+**outbound-only** — they make API calls out, nothing routes in, so they need no Traefik
+entry.
+
+## HTTPS / local CA trust
+
+All `*.lab.lan` traffic is served over HTTPS via Traefik with a [mkcert](https://github.com/FiloSottile/mkcert)
+wildcard certificate. HTTP requests are permanently redirected to HTTPS. The cert is
+signed by a local CA (`traefik/certs/ca/rootCA.pem`) that browsers don't trust by
+default — you need to install it once on each device you use to access the lab.
+
+**Get the CA cert** — pull it from git or copy it from the server:
+
+```bash
+# Option A: from git (already committed — no secrets)
+git clone <repo> && cp traefik/certs/ca/rootCA.pem ~/Downloads/lab-lan-ca.pem
+
+# Option B: scp from the VM
+scp debian@192.168.0.51:~/home-lab/traefik/certs/ca/rootCA.pem ~/Downloads/lab-lan-ca.pem
+```
+
+**macOS** — install into System keychain, trust for all users:
+
+```bash
+sudo security add-trusted-cert -d -r trustRoot \
+  -k /Library/Keychains/System.keychain ~/Downloads/lab-lan-ca.pem
+```
+
+Restart your browser after importing.
+
+**Windows** — run PowerShell as Administrator:
+
+```powershell
+Import-Certificate -FilePath "$HOME\Downloads\lab-lan-ca.pem" `
+  -CertStoreLocation Cert:\LocalMachine\Root
+```
+
+Restart your browser after importing.
+
+**Linux (Debian / Ubuntu)**:
+
+```bash
+sudo cp ~/Downloads/lab-lan-ca.pem /usr/local/share/ca-certificates/lab-lan-ca.crt
+sudo update-ca-certificates
+```
+
+Firefox on Linux ignores the OS trust store — also go to
+Settings → Privacy & Security → Certificates → View Certificates → Authorities → Import
+and select `lab-lan-ca.pem`.
+
+The wildcard cert covers all current and future `*.lab.lan` services — no re-import
+needed when new services are added. Cert expires **2028-09-13**; CA is valid until
+**2036-06-13**.
 
 ## Documentation
 

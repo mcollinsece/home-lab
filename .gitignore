@@ -6,6 +6,8 @@
 # Symlinked to ~/.config/openshell/gateway.env by bootstrap/setup-host.sh.
 !openshell/gateway.env
 *.key
+*-key.pem          # mkcert private keys
+traefik/certs/ca/rootCA-key.pem
 *.age
 # Secrets directory — Bedrock keys, future agent API keys. Never commit.
 .secrets/

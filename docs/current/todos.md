@@ -3,26 +3,15 @@
 See [platform.md](platform.md) for current state and
 [../future/ai-dev-ground.md](../future/ai-dev-ground.md) for the overall arc.
 
-## Phase 4 — OpenClaw finish-up
+## Phase 4 — OpenClaw (remaining)
 
-Infrastructure is built and committed. The remaining steps are manual (secrets,
-interactive config, and a custom image build).
+OpenClaw is live at `https://openclaw.lab.lan`. Two housekeeping steps remain:
 
-- [ ] **`init-secrets`** — run once after any clean rebuild to create Podman secrets
-      (`bedrock_aws_*`, `anthropic_api_key`) and `.secrets/bedrock.env`.
-- [ ] **`cp openclaw/openclaw.env.example openclaw/openclaw.env`** — fill in (or accept
-      the default `OPENSHELL_GATEWAY_URL=http://host.containers.internal:17670`).
-- [ ] **`systemctl --user start openclaw`** — start the OpenClaw Quadlet.
-- [ ] **Configure OpenShell backend in OpenClaw UI** — `http://openclaw.lab.lan` →
-      Settings → Gateway → OpenShell → URL: `http://host.containers.internal:17670`.
-- [ ] **Custom image with openshell CLI** — once gateway config is verified:
-      ```
-      podman build -t registry.lab.lan/openclaw:latest openclaw/
-      podman push --tls-verify=false registry.lab.lan/openclaw:latest
-      ```
-      Then update `openclaw/openclaw.container` `Image=` to `registry.lab.lan/openclaw:latest`
-      and restart. This bakes the openshell CLI into the container so OpenClaw can
-      create/manage worker sandboxes directly.
+- [ ] **Configure OpenShell backend in OpenClaw UI** — Settings → Gateway → OpenShell →
+      URL: `http://host.containers.internal:17670`. This wires OpenClaw to the sandbox
+      control plane so it can create/manage worker sandboxes from the director.
+- [ ] **Verify Bedrock fallback** — `podman exec openclaw openclaw models list` should
+      show `amazon-bedrock/us.anthropic.claude-sonnet-4-6` alongside the `claude-cli` primary.
 
 ## Phase 5 — Codex sandbox
 
@@ -57,5 +46,24 @@ Add Google Gemini CLI as a sandboxed agent via the same `osbox` pattern.
       before committing to a design. If yes, run as an OpenShell BYOC sandbox (same
       control plane as other agents); if no, Quadlet with Docker socket.
 - [ ] **NeMo Agent Toolkit orchestration** — multi-agent pipeline wiring across Claude,
-      Codex, and Gemini workers. Design TBD once Phases 4–6 agents are stable and the
+      Codex, and Gemini workers. Design TBD once Phases 5–6 agents are stable and the
       director/worker dispatch pattern is proven at scale.
+
+## Phase 8 — OpenClaw alternative provider support
+
+Research and wire up the five OAuth/subscription providers OpenClaw supports natively,
+as alternatives to Bedrock for directing agent tasks.
+
+- [ ] **OpenAI / ChatGPT** — `openclaw onboard --auth-choice openai`; ChatGPT Plus/Pro
+      subscription OAuth. Test with `openai/gpt-4o` or `openai/o3`.
+- [ ] **xAI Grok** — SuperGrok / X Premium OAuth; models `grok-4.3` and `grok-build-0.1`.
+      API key fallback via `XAI_API_KEY` also supported.
+- [ ] **Google Gemini CLI** — Google account OAuth via
+      `openclaw models auth login --provider google-gemini-cli`. ⚠️ reports of Google
+      account restrictions for third-party clients — evaluate risk before enabling.
+- [ ] **GitHub Copilot** — subscription-native, no API key. Research supported models
+      and whether task-dispatch quality is adequate for a director role.
+- [ ] **OpenRouter** — OAuth or `OPENROUTER_API_KEY`; acts as a multi-model gateway.
+      Useful for provider fallback or model-routing without per-provider accounts.
+- [ ] **Document** which provider(s) to recommend as the default alternative to Bedrock
+      and update `openclaw.env.example` + `init-secrets.sh` accordingly.

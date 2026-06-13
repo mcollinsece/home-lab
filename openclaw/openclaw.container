@@ -26,17 +26,26 @@ After=network-online.target openshell-gateway.service
 ContainerName=openclaw
 # Use upstream image until the custom build (with openshell CLI) is pushed to the
 # local registry. Switch to registry.lab.lan/openclaw:latest after: podman build + push.
-Image=docker.io/openclaw/openclaw:latest
+Image=registry.lab.lan/openclaw:latest
 Network=ai-net.network
 
 # Persistent agent state (memory, task history, schedules).
-Volume=openclaw-state.volume:/home/user/.openclaw
+Volume=openclaw-state.volume:/home/node/.openclaw
 
 # Runtime config (non-secret). Copy openclaw.env.example to openclaw.env and fill in.
 EnvironmentFile=%h/home-lab/openclaw/openclaw.env
 
-# ANTHROPIC_API_KEY from Podman secret (created by bootstrap/init-secrets.sh).
-Secret=anthropic_api_key,type=env,target=ANTHROPIC_API_KEY
+# Claude CLI credentials — mount host ~/.claude so the bundled claude-cli backend
+# can reuse the existing `claude login` session (no API key needed).
+# OpenClaw invokes `claude -p` (non-interactive); Anthropic has sanctioned this usage.
+# Note: uid inside the container must match host uid 1000 (debian) for read access.
+Volume=/home/debian/.claude:/home/node/.claude:z
+
+# AWS Bedrock credentials — fallback provider if claude-cli is unavailable.
+# OpenClaw auto-detects these and enables the implicit Bedrock provider.
+Secret=bedrock_aws_access_key_id,type=env,target=AWS_ACCESS_KEY_ID
+Secret=bedrock_aws_secret_access_key,type=env,target=AWS_SECRET_ACCESS_KEY
+Secret=bedrock_aws_region,type=env,target=AWS_REGION
 
 # Browser automation requires SYS_ADMIN + shared memory.
 # Uncomment when browser-based tasks are needed; leave off otherwise.

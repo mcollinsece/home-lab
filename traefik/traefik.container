@@ -11,16 +11,21 @@ Image=docker.io/traefik:v3.3
 # Reachable on the LAN. Requires net.ipv4.ip_unprivileged_port_start <= 80
 # (set in /etc/sysctl.d/99-unprivileged-ports.conf).
 PublishPort=80:80
+PublishPort=443:443
 # Shared network with the apps Traefik routes to.
 Network=ai-net.network
 # Static config — single source of truth in this repo (Debian = AppArmor, no :Z relabel).
 Volume=%h/home-lab/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+# Dynamic TLS config + wildcard cert (mkcert, expires 2028-09-13).
+Volume=%h/home-lab/traefik/tls.yml:/etc/traefik/tls.yml:ro
+Volume=%h/home-lab/traefik/certs:/etc/traefik/certs:ro
 # Podman API for auto-discovery: rootless user socket -> docker-compatible path.
 Volume=%t/podman/podman.sock:/var/run/docker.sock:ro
-# Dashboard, routed through Traefik itself at http://traefik.lab.lan
+# Dashboard on websecure (HTTPS). http:// hits are redirected by the web entrypoint.
 Label=traefik.enable=true
 Label=traefik.http.routers.dashboard.rule=Host(`traefik.lab.lan`)
-Label=traefik.http.routers.dashboard.entrypoints=web
+Label=traefik.http.routers.dashboard.entrypoints=websecure
+Label=traefik.http.routers.dashboard.tls=true
 Label=traefik.http.routers.dashboard.service=api@internal
 
 [Service]

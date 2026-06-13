@@ -9,12 +9,22 @@
 #   podman push --tls-verify=false registry.lab.lan/openclaw:latest
 #
 # Then update openclaw.container Image= to registry.lab.lan/openclaw:latest.
-FROM docker.io/openclaw/openclaw:latest
+FROM ghcr.io/openclaw/openclaw:latest
+
+# Both CLI installs require root; switch once, install both, then drop back to node.
+USER root
+
+# Install Claude Code CLI for the claude-cli backend.
+# Credentials come from the host ~/.claude volume mount (see openclaw.container).
+# After build, verify path with: podman run --rm registry.lab.lan/openclaw:latest which claude
+RUN npm install -g @anthropic-ai/claude-code
 
 # Install openshell CLI (same version as the host — see setup-host.sh).
 ARG OPENSHELL_VERSION=v0.0.62
 RUN curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | \
     OPENSHELL_VERSION=${OPENSHELL_VERSION} sh
+
+USER node
 
 # Point openshell at the host gateway.
 # host.containers.internal resolves to the Podman host from inside a container.
