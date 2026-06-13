@@ -6,17 +6,18 @@
 # Workers (Claude Code, Codex, Gemini) run in isolated OpenShell sandboxes;
 # OpenClaw dispatches tasks and aggregates results.
 #
-# First-run checklist:
-#   1. bootstrap/init-secrets.sh  — creates the `anthropic_api_key` Podman secret
-#   2. cp openclaw/openclaw.env.example openclaw/openclaw.env  — fill in gateway URL
-#   3. systemctl --user start openclaw  — starts the container
-#   4. Open http://openclaw.lab.lan  — configure OpenShell as the sandbox backend
-#      (Settings → Gateway → OpenShell → gateway URL: http://host.containers.internal:17670)
+# First-run checklist (setup-host.sh handles steps 1 and 2 automatically):
+#   1. [auto] bootstrap/setup-host.sh builds + pushes registry.lab.lan/openclaw:latest
+#   2. [auto] openclaw.json pre-seeded in the state volume by setup-host.sh
+#   3. bootstrap/init-secrets.sh  — creates Bedrock Podman secrets
+#   4. cp openclaw/openclaw.env.example openclaw/openclaw.env
+#   5. systemctl --user start openclaw
+#   6. Open https://openclaw.lab.lan — approve device pairing, then
+#      Settings → Gateway → OpenShell → URL: http://host.containers.internal:17670
 #
-# Custom image (with openshell CLI pre-installed):
+# To rebuild the custom image manually:
 #   podman build -t registry.lab.lan/openclaw:latest openclaw/
 #   podman push --tls-verify=false registry.lab.lan/openclaw:latest
-#   Update Image= below to registry.lab.lan/openclaw:latest
 [Unit]
 Description=OpenClaw — AI agent director (orchestrates OpenShell worker sandboxes)
 Wants=network-online.target openshell-gateway.service
