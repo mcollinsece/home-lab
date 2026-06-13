@@ -136,7 +136,7 @@ if $USE_CLONE; then
   fi
 fi
 
-# ---- sandbox create -----------------------------------------------------------
+# ---- build --env, --upload, and entrypoint arrays ----------------------------
 say "Creating sandbox '$SANDBOX_NAME'"
 
 ENV_FLAGS=()
@@ -153,51 +153,59 @@ if $USE_BEDROCK; then
   )
 fi
 
+# Files are staged flat under /sandbox (guaranteed to exist), then moved into
+# place by the entrypoint wrapper before claude starts — so claude never sees
+# the first-run wizard even on its very first invocation.
+UPLOAD_FLAGS=()
+SETUP_CMDS=()
+
+if $USE_CLAUDEAI || $USE_CLONE; then
+  UPLOAD_FLAGS+=(--upload "$TMPFILE:/sandbox/.creds_upload")
+  SETUP_CMDS+=('mkdir -p /sandbox/.claude')
+  SETUP_CMDS+=('mv /sandbox/.creds_upload /sandbox/.claude/.credentials.json 2>/dev/null || true')
+  if [[ -n "$TMPFILE_SETTINGS" && -s "$TMPFILE_SETTINGS" ]]; then
+    UPLOAD_FLAGS+=(--upload "$TMPFILE_SETTINGS:/sandbox/.settings_upload")
+    SETUP_CMDS+=('mv /sandbox/.settings_upload /sandbox/.claude/settings.json 2>/dev/null || true')
+  fi
+fi
+
+if $USE_BEDROCK && [[ -f "$BEDROCK_PROJECT_SETTINGS" ]]; then
+  UPLOAD_FLAGS+=(--upload "$BEDROCK_PROJECT_SETTINGS:/sandbox/.bedrock_upload")
+  SETUP_CMDS+=('mkdir -p /sandbox/bedrock-test/.claude')
+  SETUP_CMDS+=('mv /sandbox/.bedrock_upload /sandbox/bedrock-test/.claude/settings.json 2>/dev/null || true')
+fi
+
+if [[ ${#UPLOAD_FLAGS[@]} -gt 0 ]]; then
+  # join setup commands with '; ' then append 'exec claude'
+  SETUP_SCRIPT="$(printf '%s; ' "${SETUP_CMDS[@]}")exec claude"
+  ENTRYPOINT=(-- sh -c "$SETUP_SCRIPT")
+else
+  ENTRYPOINT=(-- claude)
+fi
+
+# ---- create (blocks — claude runs interactively; files pre-staged via --upload)
 openshell sandbox create \
   --name "$SANDBOX_NAME" \
   --no-auto-providers \
   --policy "$POLICY" \
   ${ENV_FLAGS[@]+"${ENV_FLAGS[@]}"} \
-  -- claude
+  ${UPLOAD_FLAGS[@]+"${UPLOAD_FLAGS[@]}"} \
+  "${ENTRYPOINT[@]}"
 
-ok "Sandbox '$SANDBOX_NAME' created"
-
-# ---- upload credentials + settings (--claudeai or --clone) --------------------
-if $USE_CLAUDEAI || $USE_CLONE; then
-  say "Uploading Claude state into sandbox"
-  openshell sandbox exec -n "$SANDBOX_NAME" -- mkdir -p /sandbox/.claude
-  openshell sandbox upload -n "$SANDBOX_NAME" "$TMPFILE" /sandbox/.claude/.credentials.json
-  ok "Credentials uploaded → /sandbox/.claude/.credentials.json"
-  if [[ -n "$TMPFILE_SETTINGS" && -s "$TMPFILE_SETTINGS" ]]; then
-    openshell sandbox upload -n "$SANDBOX_NAME" "$TMPFILE_SETTINGS" /sandbox/.claude/settings.json
-    ok "Settings uploaded  → /sandbox/.claude/settings.json (no login wizard, theme preserved)"
-  fi
-fi
-
-# ---- upload bedrock project example settings -----------------------------------
-if $USE_BEDROCK && [[ -f "$BEDROCK_PROJECT_SETTINGS" ]]; then
-  say "Uploading Bedrock project example (bedrock-test)"
-  openshell sandbox exec -n "$SANDBOX_NAME" -- mkdir -p /sandbox/bedrock-test/.claude
-  openshell sandbox upload -n "$SANDBOX_NAME" \
-    "$BEDROCK_PROJECT_SETTINGS" /sandbox/bedrock-test/.claude/settings.json
-  ok "Bedrock-test project ready at /sandbox/bedrock-test"
-fi
-
-# ---- summary ------------------------------------------------------------------
+# ---- summary (prints after user exits claude) ---------------------------------
 AUTH_MODES=()
 $USE_BEDROCK  && AUTH_MODES+=("Bedrock (keys injected via --env)")
 $USE_CLAUDEAI && AUTH_MODES+=("Claude.ai (token from host director)")
 $USE_CLONE    && AUTH_MODES+=("Subscription (token cloned from '$CLONE_SRC')")
 [[ ${#AUTH_MODES[@]} -eq 0 ]] && AUTH_MODES+=("none — run 'claude login' inside the sandbox")
 
-printf '\n\033[1;32m=== Sandbox ready ===\033[0m\n'
+printf '\n\033[1;32m=== Session ended — sandbox still running ===\033[0m\n'
 printf '  Name:   %s\n' "$SANDBOX_NAME"
 printf '  Auth:   %s\n' "${AUTH_MODES[*]}"
-printf '  Policy: %s\n' "$POLICY"
-printf '\n  Connect: openshell sandbox connect %s\n' "$SANDBOX_NAME"
+printf '\n  Reconnect: openshell sandbox connect %s\n' "$SANDBOX_NAME"
 
 if ! $USE_CLAUDEAI && ! $USE_CLONE; then
-  printf '\n  \033[1;33mNext:\033[0m Inside the sandbox, run: claude login\n'
+  printf '\n  \033[1;33mNote:\033[0m Run inside the sandbox: claude login\n'
   printf '  (OAuth cannot be scripted — one interactive step per fresh sandbox)\n'
 fi
 
