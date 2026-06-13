@@ -32,6 +32,28 @@ say() { printf '\n\033[1;36m==>\033[0m %s\n' "$*"; }
 ok()  { printf '\033[1;32m  ✓\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
+# Inject hasTrustDialogAccepted=true for /sandbox into a .claude.json temp file.
+# Claude Code checks this field before showing the "do you trust this folder?" dialog.
+add_sandbox_trust() {
+  local file="$1" tmp
+  tmp="$(mktemp)"
+  python3 -c "
+import sys, json
+d = json.load(open(sys.argv[1]))
+if 'projects' not in d:
+    d['projects'] = {}
+proj = d['projects'].get('/sandbox', {})
+proj['hasTrustDialogAccepted'] = True
+proj.setdefault('allowedTools', [])
+proj.setdefault('mcpContextUris', [])
+proj.setdefault('mcpServers', {})
+proj.setdefault('enabledMcpjsonServers', [])
+proj.setdefault('disabledMcpjsonServers', [])
+d['projects']['/sandbox'] = proj
+open(sys.argv[2], 'w').write(json.dumps(d))
+" "$file" "$tmp" && mv "$tmp" "$file"
+}
+
 # ---- parse args ---------------------------------------------------------------
 SANDBOX_NAME=""
 USE_BEDROCK=false
@@ -121,7 +143,8 @@ if $USE_CLAUDEAI; then
   ok "settings.json copied"
   TMPFILE_CLAUDE_JSON="$(mktemp)"; chmod 600 "$TMPFILE_CLAUDE_JSON"
   cp "$HOST_CLAUDE_JSON" "$TMPFILE_CLAUDE_JSON"
-  ok ".claude.json copied (hasCompletedOnboarding=true — no wizard on first launch)"
+  add_sandbox_trust "$TMPFILE_CLAUDE_JSON"
+  ok ".claude.json copied + /sandbox pre-trusted (no wizard, no trust dialog)"
 fi
 
 if $USE_CLONE; then
@@ -147,7 +170,8 @@ if $USE_CLONE; then
   openshell sandbox exec -n "$CLONE_SRC" -- \
     cat /sandbox/.claude.json > "$TMPFILE_CLAUDE_JSON" 2>/dev/null || true
   if [[ -s "$TMPFILE_CLAUDE_JSON" ]]; then
-    ok ".claude.json read from '$CLONE_SRC'"
+    add_sandbox_trust "$TMPFILE_CLAUDE_JSON"
+    ok ".claude.json read from '$CLONE_SRC' + /sandbox pre-trusted"
   else
     ok "No .claude.json in '$CLONE_SRC' — wizard will run on first launch"
     TMPFILE_CLAUDE_JSON=""
