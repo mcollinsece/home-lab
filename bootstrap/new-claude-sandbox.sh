@@ -25,6 +25,7 @@ POLICY="$REPO_DIR/openshell/policies/claude-code.yaml"
 BEDROCK_ENV="$REPO_DIR/.secrets/bedrock.env"
 HOST_CREDS="$HOME/.claude/.credentials.json"
 HOST_SETTINGS="$HOME/.claude/settings.json"
+HOST_CLAUDE_JSON="$HOME/.claude.json"          # internal state: hasCompletedOnboarding, migrations, etc.
 BEDROCK_PROJECT_SETTINGS="$REPO_DIR/openshell/project-settings/bedrock-test.json"
 
 say() { printf '\n\033[1;36m==>\033[0m %s\n' "$*"; }
@@ -66,9 +67,11 @@ done
 # ---- temp files — hold cloned credentials/settings, auto-cleaned on any exit --
 TMPFILE=""
 TMPFILE_SETTINGS=""
+TMPFILE_CLAUDE_JSON=""
 cleanup() {
-  [[ -z "$TMPFILE"          || ! -f "$TMPFILE"          ]] || rm -f "$TMPFILE"
-  [[ -z "$TMPFILE_SETTINGS" || ! -f "$TMPFILE_SETTINGS" ]] || rm -f "$TMPFILE_SETTINGS"
+  [[ -z "$TMPFILE"             || ! -f "$TMPFILE"             ]] || rm -f "$TMPFILE"
+  [[ -z "$TMPFILE_SETTINGS"    || ! -f "$TMPFILE_SETTINGS"    ]] || rm -f "$TMPFILE_SETTINGS"
+  [[ -z "$TMPFILE_CLAUDE_JSON" || ! -f "$TMPFILE_CLAUDE_JSON" ]] || rm -f "$TMPFILE_CLAUDE_JSON"
 }
 trap cleanup EXIT
 
@@ -96,6 +99,9 @@ if $USE_CLAUDEAI; then
   [[ -r "$HOST_SETTINGS" ]] \
     || die "--claudeai: $HOST_SETTINGS not found. Expected after first run of claude on the host."
   ok "Host settings.json readable"
+  [[ -r "$HOST_CLAUDE_JSON" ]] \
+    || die "--claudeai: $HOST_CLAUDE_JSON not found. Expected after first run of claude on the host."
+  ok "Host .claude.json readable (hasCompletedOnboarding + migration state)"
 fi
 
 if $USE_CLONE; then
@@ -112,7 +118,10 @@ if $USE_CLAUDEAI; then
   ok ".credentials.json copied"
   TMPFILE_SETTINGS="$(mktemp)"; chmod 600 "$TMPFILE_SETTINGS"
   cp "$HOST_SETTINGS" "$TMPFILE_SETTINGS"
-  ok "settings.json copied (theme, skipDangerousModePermissionPrompt, onboarding state)"
+  ok "settings.json copied"
+  TMPFILE_CLAUDE_JSON="$(mktemp)"; chmod 600 "$TMPFILE_CLAUDE_JSON"
+  cp "$HOST_CLAUDE_JSON" "$TMPFILE_CLAUDE_JSON"
+  ok ".claude.json copied (hasCompletedOnboarding=true — no wizard on first launch)"
 fi
 
 if $USE_CLONE; then
@@ -133,6 +142,15 @@ if $USE_CLONE; then
   else
     ok "No settings.json in '$CLONE_SRC' — sandbox will use defaults"
     TMPFILE_SETTINGS=""
+  fi
+  TMPFILE_CLAUDE_JSON="$(mktemp)"; chmod 600 "$TMPFILE_CLAUDE_JSON"
+  openshell sandbox exec -n "$CLONE_SRC" -- \
+    cat /sandbox/.claude.json > "$TMPFILE_CLAUDE_JSON" 2>/dev/null || true
+  if [[ -s "$TMPFILE_CLAUDE_JSON" ]]; then
+    ok ".claude.json read from '$CLONE_SRC'"
+  else
+    ok "No .claude.json in '$CLONE_SRC' — wizard will run on first launch"
+    TMPFILE_CLAUDE_JSON=""
   fi
 fi
 
@@ -166,6 +184,11 @@ if $USE_CLAUDEAI || $USE_CLONE; then
   if [[ -n "$TMPFILE_SETTINGS" && -s "$TMPFILE_SETTINGS" ]]; then
     UPLOAD_FLAGS+=(--upload "$TMPFILE_SETTINGS:/sandbox/.settings_upload")
     SETUP_CMDS+=('mv /sandbox/.settings_upload /sandbox/.claude/settings.json 2>/dev/null || true')
+  fi
+  if [[ -n "$TMPFILE_CLAUDE_JSON" && -s "$TMPFILE_CLAUDE_JSON" ]]; then
+    # .claude.json lives at home root, not inside .claude/ — stages as .claude_json_upload
+    UPLOAD_FLAGS+=(--upload "$TMPFILE_CLAUDE_JSON:/sandbox/.claude_json_upload")
+    SETUP_CMDS+=('mv /sandbox/.claude_json_upload /sandbox/.claude.json 2>/dev/null || true')
   fi
 fi
 
