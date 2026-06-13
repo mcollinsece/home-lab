@@ -5,11 +5,6 @@ See [platform.md](platform.md) for current state and
 
 ## Critical / unblockers
 
-- [ ] **Rotate IAM access key** `AKIAXNGUU6EIISYI3O4S` — pasted in a Claude chat and
-      lives in host shell history. Steps: create a new key for the same scoped IAM user
-      → update `~/.secrets/bedrock.env` → verify Bedrock still works → delete the old
-      key in IAM console.
-
 - [ ] **Document/script secrets re-creation** from password manager for a clean-host
       rebuild. Two stores: (a) Podman secrets for quadlet services (none yet);
       (b) sandbox-resident creds — `claude login` (OAuth, interactive only) and
