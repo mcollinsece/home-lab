@@ -33,7 +33,7 @@
 - Ad/tracker blocking
 - DNS rewrites (configured ✅): `*.lab.lan → 192.168.0.51`, `adguard.lan → 192.168.0.53`, `debian.lan → 192.168.0.51`. LAN clients that use AdGuard for DNS (via DHCP) resolve lab hostnames; verified `portainer.lab.lan → 192.168.0.51 → Traefik HTTP 200`.
 
-> **Note:** the homelab VM itself resolves via the router (`192.168.0.1`) + Tailscale, **not** AdGuard, so `*.lab.lan` does not resolve *from the VM*. Harmless (Traefik routes by Host header; sandboxes are outbound-only). Point the VM's resolver at `192.168.0.53` only if you want it to reach services by name locally.
+> **Note:** the homelab VM itself resolves via the router (`192.168.0.1`) + Tailscale, **not** AdGuard, so `*.lab.lan` does not resolve *from the VM*. Harmless — Traefik routes by Host header; sandboxes are outbound-only. Point the VM's resolver at `192.168.0.53` only if you want it to reach services by name locally.
 
 ---
 
@@ -44,10 +44,10 @@
 | Resource | Value | Notes |
 |---|---|---|
 | OS | Debian 13 (trixie) | |
-| Podman runtime | rootless Podman 5.4.2 (overlay) | for Quadlet services + OpenShell sandboxes |
+| Podman runtime | rootless Podman 5.4.2 (overlay) | Quadlet services + OpenShell sandboxes |
 | Node.js | v22.22.3 / npm 10.9.8 | NodeSource; Phase 1 prereq |
 | OpenShell | v0.0.62 | agent sandbox runtime; gateway on `:17670`, Podman driver |
-| Docker Engine | not installed | OpenShell runs on Podman; Docker is an optional fallback, and is needed for the Phase 6 NemoClaw experiment (see future plan) |
+| Docker Engine | not installed | OpenShell runs on Podman; needed only for Phase 7 NemoClaw if Podman can't substitute |
 | User | `debian` uid 1000, `sudo` | linger enabled — services survive logout |
 | CPU / RAM | 4 vCPU / 15 GB | meets minimum; 8 vCPU / 16–24 GB recommended for multi-agent |
 | Disk | 108 GB total, ~101 GB free | resized from 8 GB; no LVM |
@@ -60,72 +60,101 @@
 | `ai-net` | Podman bridge network | internal | ✅ |
 | Traefik | Podman Quadlet | label-discovery via `podman.sock`, port `:80` | ✅ |
 | Portainer | Podman Quadlet | `portainer.lab.lan` | ✅ |
-| OpenShell gateway | systemd `--user` service | `0.0.0.0:17670` (mTLS), Podman driver, `openshell` bridge | ✅ |
-| `claude-code` sandbox | OpenShell sandbox (Podman) | outbound-only; dual-auth policy v2 `openshell/policies/claude-code.yaml` (Anthropic + Bedrock egress) | ✅ dual-auth live: subscription (default) + Bedrock Sonnet 4.6 per-project, both verified |
+| Registry | Podman Quadlet | `registry.lab.lan` — Docker Registry v2 | ✅ |
+| OpenShell gateway | systemd `--user` service | `0.0.0.0:17670` (mTLS), Podman driver | ✅ |
+| `claude-code` sandbox | OpenShell sandbox | dual-auth: subscription (default) + Bedrock Sonnet 4.6 per-project | ✅ |
+| OpenClaw | Podman Quadlet | `openclaw.lab.lan` — agent director; orchestrates OpenShell worker sandboxes | ⬜ pending `init-secrets` + `openclaw.env` |
 
-> **OpenShell config note:** the gateway must bind `0.0.0.0:17670` (not the Debian `.deb` default of `127.0.0.1`) so sandbox containers can reach it over the host bridge. Driver + bind live in [`openshell/gateway.env`](../../openshell/gateway.env) (`OPENSHELL_DRIVERS=podman`, `OPENSHELL_BIND_ADDRESS=0.0.0.0`), git-managed and symlinked to `~/.config/openshell/gateway.env` by the bootstrap script. mTLS gates the wider bind. `openshell doctor check` falsely errors on Docker even when Podman is active — cosmetic.
+> **OpenShell config note:** the gateway must bind `0.0.0.0:17670` (not the default `127.0.0.1`) so sandbox containers can reach it over the host bridge. Driver + bind live in [`openshell/gateway.env`](../../openshell/gateway.env), symlinked to `~/.config/openshell/gateway.env` by `setup-host.sh`. mTLS gates the wider bind. `openshell doctor check` falsely errors on Docker even when Podman is active — cosmetic.
+
+### CLI tools (PATH-resident, in `~/.local/bin`)
+
+| Command | Source | Purpose |
+|---|---|---|
+| `osbox` | `bootstrap/osbox` | Spin up an auth-ready OpenShell agent sandbox (`--claudeai`, `--bedrock`, `--clone`, `--headless`) |
+| `init-secrets` | `bootstrap/init-secrets.sh` | Populate `.secrets/*.env` and Podman secrets from password manager after a clean rebuild |
+
+Both are symlinked by `setup-host.sh` and resolve back to the repo via `readlink -f` so they work correctly even when invoked through the symlink.
+
+### Agent sandbox architecture
+
+```
+OpenClaw (Quadlet — always-on director at openclaw.lab.lan)
+   └── OpenShell gateway (:17670)  ← OpenClaw backend
+         ├── claude-code sandbox  (worker — osbox --claudeai [--bedrock] [--headless])
+         ├── codex sandbox        (worker — osbox --codex,   Phase 5)
+         └── gemini sandbox       (worker — osbox --gemini,  Phase 6)
+```
+
+OpenClaw is the orchestration layer above OpenShell. It calls `openshell sandbox create`
+internally (native integration: `docs.openclaw.ai/gateway/openshell`) to spawn and manage
+worker sandboxes. **OpenShell is the control plane for all agent isolation.** OpenClaw
+runs as a Quadlet (not inside a sandbox) because it needs to reach the gateway as a client.
+
+For k8s migration: OpenClaw Quadlet → k8s Deployment; OpenShell sandboxes → k8s Pods.
+
+### Agent sandbox lifecycle
+
+OpenShell sandboxes have **container-local, manually-initialized state** — no provider
+auto-injects credentials. Consequences:
+
+- **A brand-new sandbox starts blank** — zero auth. Auth is staged by `osbox`: it
+  uploads `~/.claude/.credentials.json`, `settings.json`, and `.claude.json` (with
+  `/sandbox` pre-trusted) before the entrypoint runs, so Claude Code starts without
+  the wizard or trust dialog.
+- **The `claude-code` sandbox holds its auth** in `/sandbox/.claude/` (subscription
+  token + Bedrock AWS keys in `settings.json` env block). Persists across
+  `exec`/`connect`; survives as long as the container isn't removed.
+- **Not pinned across reboots** — the sandbox container has no restart policy. After a
+  host reboot, restart with `openshell sandbox create` or use `osbox` to recreate.
+  A snapshot revert wipes the container entirely → redo manual auth steps.
+- **`osbox` is idempotent** — running it twice on the same name exits cleanly with
+  connect/dispatch/recreate instructions. Safe to call from a boot service.
+
+### Secrets management
+
+Two parallel stores (different consumers, both populated by `init-secrets`):
+
+| Store | Path | Consumer |
+|---|---|---|
+| `.secrets/bedrock.env` | `~/home-lab/.secrets/` (gitignored) | `osbox --bedrock` (env injection into OpenShell sandboxes) |
+| Podman secrets | `podman secret ls` | Quadlet containers via `Secret=` directive (OpenClaw `anthropic_api_key`, future Codex/Gemini) |
 
 ### Reproducing this host
-
-This server is **transitional** — not its forever home — so everything is
-designed to rebuild from a clean checkout:
 
 ```bash
 git clone <repo> ~/home-lab && ~/home-lab/bootstrap/setup-host.sh
 ```
 
-[`bootstrap/setup-host.sh`](../../bootstrap/setup-host.sh) is idempotent and
-reproduces: base packages, Node 22, linger, the Podman socket, the Quadlet
-symlinks (ai-net/Traefik/Portainer), OpenShell (pinned `v0.0.62`), and the
-git-managed `gateway.env` symlink. It deliberately leaves out anything sensitive
-or interactive — those are tracked in [todos.md](todos.md).
+[`bootstrap/setup-host.sh`](../../bootstrap/setup-host.sh) is idempotent and reproduces:
+base packages, Node 22, linger, Podman socket, Quadlet symlinks (ai-net / Traefik /
+Portainer / Registry / OpenClaw), OpenShell (pinned `v0.0.62`), gateway.env symlink,
+Podman registries.conf (`registry.lab.lan` insecure), and PATH tools (`osbox`,
+`init-secrets`).
 
-> **Verified 2026-06-12:** re-ran end-to-end and confirmed every checklist item
-> (Node 22, OpenShell `v0.0.62`, gateway + `podman.socket` active, `driver=podman`,
-> bind `0.0.0.0:17670`, `Connected`), plus the manual post-steps — `claude-code`
-> sandbox `Ready`/healthy, `claude login` + a live prompt through the egress policy,
-> and `portainer.lab.lan` → Traefik 200. This was an **idempotent re-run over the
-> live host**, not a clean snapshot-revert; the from-scratch rebuild is unproven but
-> low-risk (repo + [TROUBLESHOOTING.md](../../bootstrap/TROUBLESHOOTING.md) are the
-> durability guarantee, not a VM snapshot). See [todos.md](todos.md) for the detail.
+Manual steps after `setup-host.sh` (tracked in [todos.md](todos.md)):
+- `init-secrets` — Bedrock keys + Anthropic API key → Podman secrets + `.secrets/`
+- `cp openclaw/openclaw.env.example openclaw/openclaw.env`
+- `claude login` (interactive OAuth — cannot be scripted)
+- `systemctl --user start openclaw`
+- Configure OpenShell backend in OpenClaw UI
 
-### Agent sandbox lifecycle (important)
-
-OpenShell sandboxes are **container-local, manually-initialized state** — there is
-no provider configured to auto-inject credentials (`openshell provider list` →
-none), and no provider type fits this setup's auth anyway (subscription is
-interactive OAuth; Bedrock needs env-var keys for SigV4). Consequences:
-
-- **A brand-new sandbox starts blank** — fresh `/sandbox` from the base image, zero
-  auth. Auth is initialized only by what you put into the create flow: `claude
-  login` (subscription) and AWS keys via `--env` at create or a `settings.json`
-  merge (Bedrock). Nothing carries over from the existing `claude-code` sandbox.
-- **The existing `claude-code` sandbox holds its auth** in `/sandbox/.claude/`
-  (`.credentials.json` = subscription, `settings.json` env = AWS keys). It persists
-  across `exec`/`connect` and survives on disk as long as the container isn't
-  *removed*.
-- **Not pinned across reboot:** the sandbox container's restart policy is `no` and
-  there's no systemd/Quadlet unit — after a host reboot it may need a restart
-  (Phase 5's always-on OpenClaw will need a Quadlet/restart policy). A snapshot
-  revert wipes it entirely → re-do the manual auth steps.
-
-A reproducible spawn script (`bootstrap/new-claude-sandbox.sh`) is tracked in
-[todos.md](todos.md).
+> **Verified 2026-06-12:** idempotent re-run confirmed — Node 22, OpenShell `v0.0.62`,
+> gateway + `podman.socket` active, `driver=podman`, bind `0.0.0.0:17670`, `Connected`.
+> Manual post-steps also verified: `claude-code` sandbox Ready/healthy, `claude login`,
+> live prompt through egress policy, `portainer.lab.lan` → Traefik 200. This was an
+> idempotent re-run over the live host; a clean from-scratch rebuild is unproven but
+> low-risk. See [TROUBLESHOOTING.md](../../bootstrap/TROUBLESHOOTING.md).
 
 ### Pending
 
-Outstanding work (manual/sensitive/interactive items + next phases) lives in
-**[todos.md](todos.md)**. Headlines:
+Outstanding work lives in **[todos.md](todos.md)**. Current state:
 
-- [ ] Phase 4 Codex + Gemini CLI sandboxes; local registry `:5000`; reproducible
-      sandbox-spawn script; Podman secrets
-- [x] ~~Phase 1 (Node 22)~~ · ~~Phase 2 (OpenShell + Claude Code subscription)~~ ·
-      ~~`setup-host.sh`~~ · ~~AdGuard `*.lab.lan` wildcard~~ ·
-      ~~**Phase 3 Bedrock dual-auth**~~ — **done (2026-06-12)**
-
-> **Docker Engine:** confirmed **not** needed for the agent baseline — OpenShell
-> runs natively on rootless Podman. Install only for the deferred Phase 6
-> NemoClaw experiment.
+- ⬜ Phase 4 finish-up — `init-secrets`, `openclaw.env`, start OpenClaw, configure gateway, custom image build
+- ⬜ Phase 5 — Codex CLI sandbox (`osbox --codex`)
+- ⬜ Phase 6 — Gemini CLI sandbox (`osbox --gemini`)
+- ⬜ Phase 7 — NemoClaw + NeMo Agent Toolkit orchestration
+- ✅ Phase 1 (Node 22) · Phase 2 (OpenShell + Claude Code subscription) · `setup-host.sh` · AdGuard `*.lab.lan` · Phase 3 (Bedrock dual-auth) · Phase 4 infra (registry, OpenClaw Quadlet, `osbox`, `init-secrets`)
 
 ---
 
@@ -134,14 +163,16 @@ Outstanding work (manual/sensitive/interactive items + next phases) lives in
 ```
 Internet
     │
-  Router
+  Router (192.168.0.1)
     │
   LAN (192.168.0.0/24)
     ├── 192.168.0.50  Proxmox host (Dell OptiPlex 7050 Micro)
-    │     ├── 192.168.0.53  AdGuard Home (LXC) — DHCP + DNS, *.lab.lan wildcard ☐
+    │     ├── 192.168.0.53  AdGuard Home (LXC) — DHCP + DNS, *.lab.lan wildcard
     │     └── 192.168.0.51  homelab VM (Debian 13)
-    │           ├── Traefik (Quadlet) — label-based reverse proxy on :80
+    │           ├── Traefik (Quadlet) — reverse proxy :80, label-based routing
     │           ├── Portainer (Quadlet) — portainer.lab.lan
+    │           ├── Registry (Quadlet) — registry.lab.lan (Docker Registry v2 :5000)
+    │           ├── OpenClaw (Quadlet) — openclaw.lab.lan (agent director :18789)
     │           ├── OpenShell gateway (systemd --user) — :17670, deny-by-default
     │           │     └── claude-code sandbox (Podman) — outbound-only, dual-auth
     │           └── projects/ — one Quadlet per service on ai-net
@@ -154,6 +185,8 @@ Internet
 
 1. Client requests `<service>.lab.lan`
 2. AdGuard resolves `*.lab.lan` → `192.168.0.51`
-3. Traefik routes to the matching container via `ContainerName` label (`<name>` → `<name>.lab.lan`)
+3. Traefik routes to the matching container via `ContainerName` label
 
-Traefik's `defaultRule` is `Host("{{ normalize .Name }}.lab.lan")` — naming a container `grafana` makes it available at `grafana.lab.lan` with no extra label. An explicit `traefik.http.routers.*.rule` label overrides this for custom hostnames.
+Traefik's `defaultRule` is `Host("{{ normalize .Name }}.lab.lan")` — naming a container
+`grafana` makes it available at `grafana.lab.lan` with no extra label. An explicit
+`traefik.http.routers.*.rule` label overrides this for custom hostnames or paths.
