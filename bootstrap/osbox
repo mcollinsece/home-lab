@@ -1,30 +1,32 @@
 #!/usr/bin/env bash
 #
-# new-claude-sandbox.sh — spin up an auth-ready Claude Code OpenShell sandbox
+# osbox — spin up an auth-ready OpenShell agent sandbox
 #
 # Usage:
-#   new-claude-sandbox.sh <name> [--bedrock] [--claudeai | --clone <src-sandbox>] [--headless]
+#   osbox <name> [--bedrock] [--claudeai | --clone <src-sandbox>] [--headless]
 #
 # Flags (composable — combine freely):
 #   --bedrock              inject Bedrock keys from ~/home-lab/.secrets/bedrock.env
 #   --claudeai             clone Claude.ai token from host ~/.claude/.credentials.json
 #   --clone <src>          clone token from a running OpenShell sandbox (agent-agnostic)
 #   --headless             create sandbox ready for task dispatch, no TUI attach.
-#                          Use for autonomous agents; dispatch tasks with:
-#                            openshell sandbox exec -n <name> -- claude -p "your task"
+#                          Dispatch tasks with:
+#                            openshell sandbox exec -n <name> -- <agent> -p "your task"
 #
 # Examples:
-#   new-claude-sandbox.sh worker-1 --bedrock
-#   new-claude-sandbox.sh worker-1 --claudeai
-#   new-claude-sandbox.sh worker-1 --clone claude-code
-#   new-claude-sandbox.sh worker-1 --bedrock --claudeai
-#   new-claude-sandbox.sh worker-1 --claudeai --headless          # autonomous worker
-#   new-claude-sandbox.sh worker-1 --bedrock --claudeai --headless
+#   osbox worker-1 --bedrock
+#   osbox worker-1 --claudeai
+#   osbox worker-1 --clone claude-code
+#   osbox worker-1 --bedrock --claudeai
+#   osbox worker-1 --claudeai --headless          # autonomous worker
+#   osbox worker-1 --bedrock --claudeai --headless
 #
 # See docs/current/todos.md for design notes (director/worker pattern, auth modes).
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Resolve real script path so REPO_DIR stays correct when osbox is run via a symlink in PATH.
+_SCRIPT_REAL="$(readlink -f "${BASH_SOURCE[0]}")"
+REPO_DIR="$(cd "$(dirname "$_SCRIPT_REAL")/.." && pwd)"
 POLICY="$REPO_DIR/openshell/policies/claude-code.yaml"
 BEDROCK_ENV="$REPO_DIR/.secrets/bedrock.env"
 HOST_CREDS="$HOME/.claude/.credentials.json"
@@ -65,6 +67,7 @@ USE_CLAUDEAI=false
 USE_CLONE=false
 CLONE_SRC=""
 HEADLESS=false
+AGENT_CMD=claude   # override for future --codex / --gemini flags
 
 usage() {
   grep '^#' "$0" | grep -v '^#!/' | sed 's/^# \?//'
@@ -88,7 +91,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$SANDBOX_NAME" ]] \
-  || die "Usage: new-claude-sandbox.sh <name> [--bedrock] [--claudeai | --clone <src>] [--headless]"
+  || die "Usage: osbox <name> [--bedrock] [--claudeai | --clone <src>] [--headless]"
 ( $USE_CLAUDEAI && $USE_CLONE ) \
   && die "--claudeai and --clone are mutually exclusive (both clone auth; pick one)"
 
@@ -232,14 +235,14 @@ if [[ ${#UPLOAD_FLAGS[@]} -gt 0 ]]; then
   if $HEADLESS; then
     SETUP_SCRIPT="$(printf '%s; ' "${SETUP_CMDS[@]}")exit 0"
   else
-    SETUP_SCRIPT="$(printf '%s; ' "${SETUP_CMDS[@]}")exec claude"
+    SETUP_SCRIPT="$(printf '%s; ' "${SETUP_CMDS[@]}")exec $AGENT_CMD"
   fi
   ENTRYPOINT=(-- sh -c "$SETUP_SCRIPT")
 else
   if $HEADLESS; then
     ENTRYPOINT=(-- sh -c "exit 0")
   else
-    ENTRYPOINT=(-- claude)
+    ENTRYPOINT=(-- "$AGENT_CMD")
   fi
 fi
 
@@ -270,7 +273,7 @@ if $HEADLESS; then
   printf '\n\033[1;32m=== Sandbox ready (headless) ===\033[0m\n'
   printf '  Name: %s\n' "$SANDBOX_NAME"
   printf '  Auth: %s\n' "${AUTH_MODES[*]}"
-  printf '\n  Dispatch: openshell sandbox exec -n %s -- claude -p "your task"\n' "$SANDBOX_NAME"
+  printf '\n  Dispatch: openshell sandbox exec -n %s -- %s -p "your task"\n' "$SANDBOX_NAME" "$AGENT_CMD"
   printf '  Connect:  openshell sandbox connect %s\n' "$SANDBOX_NAME"
 else
   printf '\n\033[1;32m=== Session ended — sandbox still running ===\033[0m\n'
