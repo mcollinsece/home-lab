@@ -71,15 +71,103 @@ Manual, sensitive, or interactive steps the bootstrap can't do. See
       creds for agents — subscription via `claude login`, AWS Bedrock keys via the
       sandbox `~/.claude/settings.json` `env` block (see Phase 3). A snapshot revert
       wipes both → re-add manually.
-- [ ] **`bootstrap/new-claude-sandbox.sh <name>` — reproducible auth-ready spawn.**
+- [ ] **`bootstrap/new-claude-sandbox.sh` — reproducible auth-ready sandbox spawn.**
+
       New sandboxes start blank (no provider auto-injects creds; see platform.md
-      "Agent sandbox lifecycle"). Script should: source AWS keys from a gitignored
-      `~/home-lab/.secrets/bedrock.env` (never argv/git) → `openshell sandbox create
-      … --policy … --env AWS_*` → `--upload` the non-secret Bedrock project
-      `settings.json` → print the one manual step left (`claude login`, OAuth can't
-      be scripted) or offer to clone `.credentials.json` from the live sandbox.
-      Open question for me: re-login per sandbox (isolation) vs clone one token (no
-      re-login, shared subscription session).
+      "Agent sandbox lifecycle"). The script covers two auth modes, selectable at
+      run-time:
+
+      **Usage (flags are composable — combine freely):**
+      ```
+      new-claude-sandbox.sh <name> [--bedrock] [--claudeai | --clone <src-sandbox>]
+      ```
+      Examples:
+      ```
+      new-claude-sandbox.sh worker-1 --bedrock                  # Bedrock keys; must claude login
+      new-claude-sandbox.sh worker-1 --claudeai                 # Host auth; no login needed
+      new-claude-sandbox.sh worker-1 --clone claude-code        # Clone from another sandbox
+      new-claude-sandbox.sh worker-1 --bedrock --claudeai       # Both: full replica of director
+      new-claude-sandbox.sh worker-1 --bedrock --clone <src>    # Both: Bedrock + cloned sandbox
+      ```
+
+      **`--bedrock`**
+      - Sources AWS keys from `~/home-lab/.secrets/bedrock.env` (gitignored, never
+        argv — keys go to `--env` flags only via `source`; never in `$@` or history).
+        File format:
+        ```bash
+        AWS_ACCESS_KEY_ID=AKIAxxxxx
+        AWS_SECRET_ACCESS_KEY=xxxxx
+        AWS_REGION=us-east-1
+        ```
+      - Passes keys as `--env` flags to `openshell sandbox create`. Keys are inert
+        until a project sets `CLAUDE_CODE_USE_BEDROCK=1`.
+      - Without `--claudeai` or `--clone`: prints **"Now run: openshell sandbox
+        connect <name> → claude login"** (OAuth can't be scripted).
+
+      **`--claudeai`**
+      - Clones the subscription token from the **host-level Claude Code session**
+        (the director). Source: `~/.claude/credentials.json` — direct local file
+        read, no sandbox exec. Trade-off: new sandbox shares the host OAuth session;
+        token refreshes are transparent on Max/Pro.
+      - Steps: read → `mktemp` (mode 600, `trap`-deleted on exit) → create sandbox
+        → `openshell sandbox exec mkdir -p /sandbox/.claude` → `openshell sandbox
+        upload` credentials.json into place.
+      - Prints: **"Claude.ai token cloned from host director. No claude login needed."**
+
+      **`--clone <src-sandbox>`**
+      - Generic sandbox-to-sandbox credential clone. Copies `/sandbox/.claude/`
+        from an existing running OpenShell sandbox into the new one. Agent-agnostic:
+        will work for Codex, Gemini, or any future sandbox type once those are
+        added — a Codex worker can clone from another Codex sandbox, etc.
+      - Steps: `openshell sandbox exec -n <src> -- cat /sandbox/.claude/.credentials.json`
+        → `mktemp` (mode 600, `trap`-deleted) → create sandbox → upload into place.
+      - Use case: spinning up additional workers that replicate an existing sandbox's
+        auth state exactly, or cloning a sandbox that has already done `claude login`
+        rather than going back to the host director.
+
+      **Common post-create step (all modes):**
+      - Optionally uploads `openshell/project-settings/bedrock-test.json` to
+        `/sandbox/bedrock-test/.claude/settings.json` as the example Bedrock
+        opt-in project (non-secret; committed in git).
+      - Prints a summary: sandbox name, flags used, policy version applied,
+        one-liner to connect.
+
+      **Prerequisites the script checks and aborts on:**
+      - `openshell status` → Connected (gateway running)
+      - `~/home-lab/.secrets/bedrock.env` readable (`--bedrock`)
+      - `~/.claude/credentials.json` readable (`--claudeai`)
+      - `<src-sandbox>` is `Ready` (`--clone`)
+
+      **File layout to create:**
+      - `bootstrap/new-claude-sandbox.sh` — the script (executable, gitignored
+        `.secrets/` already in `.gitignore`)
+      - `openshell/project-settings/bedrock-test.json` — the committed non-secret
+        Bedrock project settings (`CLAUDE_CODE_USE_BEDROCK=1` etc.) that the script
+        can upload as a usage example
+      - `~/home-lab/.secrets/bedrock.env` — secrets file, gitignored, populated
+        from password manager after rotate (see key-rotation item above)
+
+      > **Host director / sandboxed workers pattern.**
+      > A Claude Code process running directly on the host (outside any OpenShell
+      > policy) has full filesystem access + the `openshell` CLI — it can spawn
+      > sandboxes, exec commands into them, upload/download files, and read their
+      > output. That makes it a natural **orchestrator/brain**: the host session
+      > directs; each OpenShell sandbox is an isolated worker with deny-by-default
+      > egress. OpenShell's primary job is isolation/containerization; the host
+      > director is what gives that fleet intentional shape.
+      >
+      > The three auth flags cover the two directions auth can flow:
+      > - `--claudeai` — director → worker (host session seeds a new sandbox)
+      > - `--clone <src>` — worker → worker (any running sandbox seeds another;
+      >   agent-agnostic, works for Codex/Gemini sandboxes in Phase 4)
+      > - `--bedrock` — orthogonal (AWS keys, combinable with either)
+      >
+      > Phase 4 extension: each new agent family adds its own host-credential flag
+      > alongside `--clone` (which already works generically):
+      > - `--codex` — clones host `~/.codex/` creds / `OPENAI_API_KEY`
+      > - `--gemini` — clones host GCP application-default token
+      > Whether that stays as per-agent scripts (`new-codex-sandbox.sh`) or merges
+      > into one `new-sandbox.sh --agent <type>` is an open decision for Phase 4.
 
 ## Phase 3 — Bedrock dual auth — COMPLETE ✅ (2026-06-12, us-east-1 + Sonnet 4.6)
 Design: subscription (OAuth) stays the **default**; Bedrock is **opt-in per
