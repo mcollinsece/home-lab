@@ -1,0 +1,21 @@
+[Unit]
+Description=NemoClaw Director Control UI probe (establishes 18789 forward for openclaw.lab.lan)
+Documentation=https://github.com/you/home-lab
+After=openshell-gateway.service
+Wants=openshell-gateway.service
+# The director sandbox must exist; the probe script waits for "Ready".
+# If the sandbox is recreated the service will be restarted by setup-nemoclaw-director.sh.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=PATH=/home/debian/.npm-global/bin:/home/debian/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=DOCKER_HOST=unix:///var/run/docker.sock
+ExecStart=%h/home-lab/bootstrap/nemoclaw-director-probe.sh
+Restart=on-failure
+RestartSec=30s
+# Give the probe (and any image build) plenty of time.
+TimeoutStartSec=600s
+
+[Install]
+WantedBy=default.target
