@@ -1,3 +1,0 @@
-# Persistent Portainer state (users, settings, endpoints). Quadlet volume unit.
-[Volume]
-VolumeName=portainer-data

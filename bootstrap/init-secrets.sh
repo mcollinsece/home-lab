@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 #
-# init-secrets.sh — populate ~/.secrets/ and Podman secrets after a clean-host rebuild.
+# init-secrets.sh — populate .secrets/ after a clean-host rebuild.
 #
 # Run once after setup-host.sh, sourcing values from your password manager.
-# Safe to re-run: Podman secrets are created with --replace; env files are overwritten.
+# Safe to re-run: env files are overwritten. Secrets are consumed by Docker
+# Compose via env_file directives (no Podman secrets or Docker Swarm needed).
 #
 # What it creates:
-#   ~/.secrets/bedrock.env         — AWS keys for osbox --bedrock (OpenShell sandbox injection)
-#   Podman secret: bedrock_aws_access_key_id
-#   Podman secret: bedrock_aws_secret_access_key
-#   Podman secret: bedrock_aws_region
-#   Podman secret: anthropic_api_key   — for OpenClaw Quadlet (Secret= directive)
+#   .secrets/bedrock.env       — AWS Bedrock credentials (for LiteLLM → Bedrock)
+#   .secrets/litellm.env       — LiteLLM master key (gates all inbound requests)
 set -euo pipefail
 
 _SCRIPT_REAL="$(readlink -f "${BASH_SOURCE[0]}")"
@@ -26,7 +24,7 @@ skip()       { printf '\033[1;90m  –\033[0m skipped (%s)\n' "$*"; }
 mkdir -p "$SECRETS_DIR"
 chmod 700 "$SECRETS_DIR"
 
-# ---- AWS Bedrock (Phase 3 — osbox --bedrock + OpenShell env injection) -----
+# ---- AWS Bedrock (LiteLLM → Bedrock routing; consumed only by litellm container) ---
 say "AWS Bedrock credentials"
 printf '  Source: IAM console → scoped user (bedrock:InvokeModel* only)\n'
 ask        "AWS_ACCESS_KEY_ID"     AWS_ACCESS_KEY_ID
@@ -40,31 +38,30 @@ AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
 AWS_REGION=${AWS_REGION}
 EOF
 chmod 600 "$SECRETS_DIR/bedrock.env"
-ok "wrote .secrets/bedrock.env  (used by osbox --bedrock)"
+ok "wrote .secrets/bedrock.env  (consumed by docker/compose.yml litellm service)"
 
-printf '%s' "$AWS_ACCESS_KEY_ID"     | podman secret create --replace bedrock_aws_access_key_id     - >/dev/null
-printf '%s' "$AWS_SECRET_ACCESS_KEY" | podman secret create --replace bedrock_aws_secret_access_key - >/dev/null
-printf '%s' "$AWS_REGION"            | podman secret create --replace bedrock_aws_region             - >/dev/null
-ok "Podman secrets: bedrock_aws_{access_key_id,secret_access_key,region}  (for Quadlet containers)"
+# ---- LiteLLM master key (auto-generated — gates all inbound requests) --------
+say "LiteLLM master key"
+printf '  Auto-generated (no manual input needed).\n'
+printf '  This key is shared between LiteLLM and OpenShell inference routing.\n'
+printf '  NemoClaw onboard: use this key as the OpenAI-compatible provider API key.\n'
 
-# ---- Anthropic API key (optional — only if using direct API instead of claude-cli) ----
-say "Anthropic API key (optional)"
-printf '  OpenClaw defaults to the claude-cli backend (host claude login, no key needed).\n'
-printf '  Only needed if you want direct Anthropic API access as the primary provider.\n'
-printf '  Source: console.anthropic.com → API keys. Leave blank to skip.\n'
-ask_secret "ANTHROPIC_API_KEY" ANTHROPIC_API_KEY
+LITELLM_MASTER_KEY="$(openssl rand -hex 32)"
 
-if [[ -n "${ANTHROPIC_API_KEY}" ]]; then
-  printf '%s' "$ANTHROPIC_API_KEY" | podman secret create --replace anthropic_api_key - >/dev/null
-  ok "Podman secret: anthropic_api_key"
-else
-  skip "no key entered — using claude-cli backend (claude login credentials)"
-fi
+cat > "$SECRETS_DIR/litellm.env" <<EOF
+LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+EOF
+chmod 600 "$SECRETS_DIR/litellm.env"
+ok "wrote .secrets/litellm.env"
 
-# ---- Summary ---------------------------------------------------------------
+# ---- Summary -----------------------------------------------------------------
 printf '\n\033[1;32m=== Done ===\033[0m\n'
-printf '  Secrets file:  %s/bedrock.env\n' "$SECRETS_DIR"
-printf '  Podman secrets:\n'
-podman secret ls --format '    {{.Name}}' 2>/dev/null || true
-printf '\n  Next: cp openclaw/openclaw.env.example openclaw/openclaw.env\n'
-printf '        systemctl --user start registry openclaw\n\n'
+printf '  Secrets files:\n'
+printf '    %s/bedrock.env\n' "$SECRETS_DIR"
+printf '    %s/litellm.env\n' "$SECRETS_DIR"
+printf '\n  Next:\n'
+printf '    docker compose -f docker/compose.yml up -d\n'
+printf '\n  NemoClaw onboard (OpenAI-compatible provider config):\n'
+printf '    API key:  %s\n' "$LITELLM_MASTER_KEY"
+printf '    Base URL: http://localhost:4000/v1\n'
+printf '    Model:    claude-sonnet-4-6\n\n'

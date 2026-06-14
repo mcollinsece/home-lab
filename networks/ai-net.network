@@ -1,4 +1,0 @@
-# Shared internal bridge. Traefik and every routable app join this network so
-# Traefik can discover and reach them. Quadlet network unit (systemd --user).
-[Network]
-NetworkName=ai-net

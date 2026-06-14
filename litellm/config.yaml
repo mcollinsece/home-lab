@@ -1,0 +1,66 @@
+# LiteLLM model routing config.
+# Mounted read-only at /app/config.yaml inside the container.
+# Restart after changes: docker compose -f ~/home-lab/docker/compose.yml restart litellm
+#
+# Bedrock inference profile IDs: use `us.anthropic.<name>` for Claude 4.x+
+# (no date suffix — newer profiles dropped the date).
+# Verify available IDs: curl -sf https://bedrock.<region>.amazonaws.com/inference-profiles \
+#   --aws-sigv4 "aws:amz:<region>:bedrock" --user "<key>:<secret>" | python3 -m json.tool
+
+model_list:
+
+  # --- Bedrock: Claude Sonnet 4.6 (cross-region inference profile) ---
+  # max_tokens: 64000 — Bedrock rejects requests with max_tokens > 128000 total;
+  # setting this caps what LiteLLM forwards so agents that request 200K don't 400.
+  - model_name: claude-sonnet-4-6
+    litellm_params:
+      model: bedrock/us.anthropic.claude-sonnet-4-6
+      aws_access_key_id: os.environ/AWS_ACCESS_KEY_ID
+      aws_secret_access_key: os.environ/AWS_SECRET_ACCESS_KEY
+      aws_region_name: os.environ/AWS_REGION
+      max_tokens: 64000
+    model_info:
+      max_tokens: 64000
+      max_input_tokens: 128000
+      max_output_tokens: 64000
+
+  # Alias so both the short name and the full ARN form resolve to the same backend.
+  - model_name: bedrock/us.anthropic.claude-sonnet-4-6
+    litellm_params:
+      model: bedrock/us.anthropic.claude-sonnet-4-6
+      aws_access_key_id: os.environ/AWS_ACCESS_KEY_ID
+      aws_secret_access_key: os.environ/AWS_SECRET_ACCESS_KEY
+      aws_region_name: os.environ/AWS_REGION
+      max_tokens: 64000
+    model_info:
+      max_tokens: 64000
+      max_input_tokens: 128000
+      max_output_tokens: 64000
+
+  # --- Future providers (uncomment when credentials are available) ---
+  # - model_name: gpt-4o
+  #   litellm_params:
+  #     model: openai/gpt-4o
+  #     api_key: os.environ/OPENAI_API_KEY
+
+  # - model_name: gemini-2-5-pro
+  #   litellm_params:
+  #     model: gemini/gemini-2.5-pro
+  #     api_key: os.environ/GOOGLE_API_KEY
+
+  # - model_name: grok-3
+  #   litellm_params:
+  #     model: xai/grok-3
+  #     api_key: os.environ/XAI_API_KEY
+
+  # - model_name: ollama-local
+  #   litellm_params:
+  #     model: openai/mistral
+  #     api_base: http://host.docker.internal:11434/v1
+  #     api_key: none
+
+litellm_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

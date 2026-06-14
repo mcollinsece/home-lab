@@ -1,0 +1,9 @@
+http:
+  routers:
+    traefik-dashboard:
+      rule: "Host(`traefik.lab.lan`)"
+      entryPoints:
+        - websecure
+      service: api@internal
+      tls: {}
+      priority: 100
