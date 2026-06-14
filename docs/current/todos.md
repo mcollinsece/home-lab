@@ -7,7 +7,7 @@ See [platform.md](platform.md) for current state and
 
 ## Immediate next steps (do these in order)
 
-> Run these after pulling the latest commit on the homelab VM. (Still the recommended post-clone / post-setup flow; valid after the Docker + NemoClaw infrastructure work in this session.)
+> Run these after pulling the latest commit on the homelab VM. (The recommended post-clone / post-setup / post-migration-repro flow. Onboard (step 7) + initial director create have been executed; the active work is director provisioning troubleshoot (step 8 route is pre-placed as static yml) and the explicit lab claude-code recreate (step 9) after any nemoclaw run or clean rebuild. See Phase 7 Remaining below for the current Bad Gateway status and exact commands.)
 
 **1 — Activate Docker group in your shell** (one-time, if you just ran setup-host.sh):
 ```bash
@@ -111,7 +111,7 @@ EOF
 
 ---
 
-## Phase 7 — Docker + NemoClaw migration ✅ (2026-06-13, pending NemoClaw onboard)
+## Phase 7 — Docker + NemoClaw migration ✅ (2026-06-13; onboard complete, claude-code Ready on lab gw; director provisioning / openclaw Bad Gateway in progress)
 
 Migrated from rootless Podman Quadlets to Docker Engine + Docker Compose.
 OpenClaw moved from a Podman Quadlet to NemoClaw (NVIDIA-managed, runs OpenClaw
@@ -128,33 +128,28 @@ inside an OpenShell sandbox).
 
 ### Remaining (post-migration manual steps) + current session todos
 
-- [ ] **Complete / troubleshoot NemoClaw director (openclaw.lab.lan Bad Gateway)**:
-      Re-run or finish `nemoclaw onboard` (or `nemoclaw onboard --recreate-sandbox`).
-      Choose OpenAI-compatible, provide LiteLLM details (key from .secrets, URL, model).
-      Provide sandbox name e.g. "director".
-      Then:
-      - `nemoclaw director status` (expect Ready / Connected, not Provisioning).
-      - If stuck in Provisioning: `nemoclaw director rebuild --yes` (recreates container; workspace preserved).
-      - Check listener: `ss -tlnp | grep 18789` (nemoclaw sets up forward).
-      - Test route: `curl -k -H 'Host: openclaw.lab.lan' https://localhost/` (should stop being 502/Bad Gateway once Ready; the pre-placed `traefik/dynamic/openclaw-nemoclaw.yml` routes it).
-      - Connect: `nemoclaw director connect` (or `nemoclaw <name> connect`).
-      - Watch gateway log: `tail -f /home/debian/.local/state/nemoclaw/openshell-docker-gateway/openshell-gateway.log` (look for supervisor relay, "CreateSandbox", GetSandbox, no "stopping" deserial errors — we cleaned old containers).
-      - Note: nemoclaw pins 0.0.44 (its gateway on 8080 plaintext); lab uses separate 17670 (mTLS). The 10.89.0.1 lo alias + iptables (added during session) are required for nemoclaw gw reachability from its bridge.
-- [ ] **Update bootstrap/setup-host.sh for full reproducibility**:
-      Script is mostly good (Docker, OpenShell 0.0.62, gateway.env symlink to simple repo version, compose up if secrets, tools). But sync the final manual-steps banner and post-nemoclaw flow:
-      - After `nemoclaw onboard`, always restore `ln -sfn ~/home-lab/openshell/gateway.env ~/.config/openshell/gateway.env` (nemoclaw may write its full 8080 config).
-      - Recreate lab claude-code **using the lab gateway explicitly**:
-        `/usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure sandbox delete claude-code || true`
-        `/usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure sandbox create --name claude-code --no-auto-providers --policy ~/home-lab/openshell/policies/claude-code.yaml --env ANTHROPIC_BASE_URL=https://inference.local --env ANTHROPIC_API_KEY=unused -- claude`
-        (Use /usr/bin for 0.0.62 + --env support; plain `openshell` may resolve to nemoclaw's 0.0.44 in PATH after its install.)
-      - Start/ensure lab gateway on 17670 if the service is now tied to nemoclaw side (manual start with env + /usr/bin/openshell-gateway --bind-address 0.0.0.0 --port 17670 + TLS certs from ~/.local/state/openshell/tls/ as needed).
-      - Note dual-gateway reality and that nemoclaw will install its own 0.0.44 CLI/gateway.
-      - (I started targeted updates to the script's final banner in this session; finish the full sync.)
-- [ ] **Verify full end-to-end reproducibility** after any setup-host.sh update: clean VM, run setup-host + init-secrets + docker compose up (if needed) + nemoclaw onboard (with details) + the two recreate commands above. Confirm: both gateways healthy, claude-code Ready with inference.local, director Ready, routes work (including openclaw.lab.lan and traefik.lab.lan/dashboard/), inference smoke from both sides, policies effective.
-- [ ] **Traefik Docker provider version skew**: Still logs "client version 1.24 too old" (min 1.40) even with DOCKER_API_VERSION=1.41 in compose (env is present after force-recreate; SDK in v3.3 image reports old). Rely on static files in dynamic/ for critical routers (we added traefik-dashboard.yml as workaround; openclaw-nemoclaw.yml already static). Other label-based services may be affected until fixed (newer Traefik image, socket proxy, or accept and document).
-- [ ] **Clean up 10.89 alias + iptables** (added as nemoclaw gw workaround during session) once director is stable and no longer needed.
-- [ ] **Persist lab gateway on 17670** (currently sometimes manual start after nemoclaw takes over the systemd service/metadata). Consider a dedicated user service or script, or keep using explicit --gateway-endpoint in all lab commands.
-- [ ] Update claude-code examples/docs everywhere to prefer explicit lab gateway endpoint post-nemoclaw.
+**Top priority (user-reported at end of session):**
+- [ ] **Troubleshoot openclaw.lab.lan Bad Gateway / director stuck in Provisioning**:
+  Current symptom (user): 502 / Bad Gateway on openclaw.lab.lan.
+  - Run: `nemoclaw director status` (expect exact phase; "Connected", not just Provisioning).
+  - `nemoclaw director rebuild --yes` (if stuck; workspace preserved).
+  - Listener: `ss -tlnp | grep 18789` (or 8080 forward).
+  - Route test: `curl -k -H 'Host: openclaw.lab.lan' https://localhost/` (should stop 502 once Ready; served via pre-placed `traefik/dynamic/openclaw-nemoclaw.yml` + file provider).
+  - Watch the nemoclaw gateway log: `tail -f /home/debian/.local/state/nemoclaw/openshell-docker-gateway/openshell-gateway.log` (CreateSandbox/GetSandbox/supervisor, policy "managed_inference" to inference.local, no legacy "stopping" errors).
+  - Connect once Ready: `nemoclaw director connect`.
+  - Dual-gw context: director uses nemoclaw's 0.0.44 gateway (8080 + 10.89.0.1 alias/iptables workaround from session); lab claude-code uses separate 17670 mTLS (0.0.62). 10.89 alias + iptables were added for nemoclaw gw reachability.
+  - After stable: consider `Clean up 10.89...` item below.
+- [ ] **Finalize bootstrap/setup-host.sh for full reproducibility** (targeted banner + NOTE updates done in session + this pass; full end-to-end clean-VM verify remains):
+  Script covers Docker/OpenShell 0.0.62/gateway.env symlink/compose if secrets + tools. Post-nemoclaw flow (symlink restore + exact lab claude-code recreate via `/usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 ...`) is in the final manual-steps heredoc and in todos immediate step 9. 
+  - After edits here, re-verify on a clean checkout: setup-host.sh + init-secrets + docker compose + nemoclaw onboard + symlink + explicit 17670 claude-code recreate + `nemoclaw director status` + route curls.
+- [ ] **Verify full end-to-end reproducibility** (see above): clean VM/snapshot, run the whole flow, confirm both gateways, claude-code Ready (inference.local), director Ready, openclaw.lab.lan + traefik.dashboard/ + litellm smoke all work, policies effective. Update this item when a full repro succeeds end-to-end.
+- [ ] **Traefik Docker provider version skew**: Persistent "client version 1.24 too old" (even with DOCKER_API_VERSION=1.41 env in compose). We rely on static `traefik/dynamic/traefik-dashboard.yml` (for dashboard) + `openclaw-nemoclaw.yml`. Documented in traefik/README.md and TROUBLESHOOTING. Fix later (newer Traefik image/SDK or socket proxy) or accept static files for critical routers.
+- [ ] **Clean up 10.89 alias + iptables** (session workaround for nemoclaw gw bind/reachability from legacy Podman subnets) once director is stable/Ready and no longer required.
+- [ ] **Persist / make robust the lab 17670 gateway** (systemd service can get taken over by nemoclaw metadata after onboard). Prefer explicit `--gateway-endpoint http://127.0.0.1:17670 --gateway-insecure` (or https) for all lab commands; or add a dedicated user service/unit for the 0.0.62 side.
+- [x] (done) Static Traefik routes + dashboard workaround pre-placed and hot-reloading (file provider).
+- [x] (done) gateway.env restore documented + symlink step in setup-host + post-nemoclaw notes everywhere.
+- [x] (done) All claude-code / lab examples updated to explicit /usr/bin + 17670 endpoint form.
+- [x] (done) DOCKER_API_VERSION, dual-gw reality, 0.0.62 re-install, container cleans, lock/pkill, cert paths, LiteLLM wiring, onboard-driven config captured in docs + TROUBLESHOOTING.
 
 (Immediate 1-9 steps below remain the recommended post-clone / post-setup flow; they are still valid.)
 

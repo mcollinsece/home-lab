@@ -16,7 +16,7 @@ with per-project switching between Claude Max/Pro subscription and Bedrock.
 |---|---|---|
 | **OpenShell** ([repo](https://github.com/NVIDIA/OpenShell)) | Open-source sandbox runtime (Apache 2.0, alpha). Gateway + per-sandbox containers, deny-by-default YAML network/filesystem/process policies, credential providers, inference router. | The foundation. Runs Claude Code, Codex, and other agents unmodified. |
 | **LiteLLM** ([repo](https://github.com/BerriAI/litellm)) | OpenAI-compatible inference proxy. Single credential boundary for all model backends. | The inference hub. All agents and NemoClaw route through `inference.local` → LiteLLM → Bedrock (today). |
-| **NemoClaw** ([repo](https://github.com/NVIDIA/NemoClaw), [docs](https://docs.nvidia.com/nemoclaw/latest/)) | NVIDIA's one-command stack for running **OpenClaw** inside an OpenShell sandbox. Docker-based. | Phase 7 ✅ (infrastructure + static routes + inference config staged; director sandbox provisioning/troubleshoot Bad Gateway in progress). Replaces the hand-rolled OpenClaw Quadlet. Lab uses separate 17670 gateway; nemoclaw manages its own 8080 gw + 0.0.44 pin. |
+| **NemoClaw** ([repo](https://github.com/NVIDIA/NemoClaw), [docs](https://docs.nvidia.com/nemoclaw/latest/)) | NVIDIA's one-command stack for running **OpenClaw** inside an OpenShell sandbox. Docker-based. | Phase 7 ✅ (infrastructure + Docker Compose + static Traefik routes in dynamic/ for openclaw-nemoclaw + dashboard + DOCKER_API_VERSION + dual-gw handling + gateway.env + claude-code on 17670 Ready; director "director" sandbox created via onboard but currently Bad Gateway / Provisioning on openclaw.lab.lan — top todo). Lab 17670 mTLS (0.0.62) vs nemoclaw 8080 (0.0.44). |
 | **NeMo Agent Toolkit** ([repo](https://github.com/NVIDIA/NeMo-Agent-Toolkit)) | Python library for orchestrating teams of agents across frameworks. | Phase 8+. The orchestration brain that coordinates sandboxed agents. |
 
 Key facts:
@@ -76,17 +76,17 @@ a single-user homelab. For now, Docker is the pragmatic choice.
                            │   │ :4000 ai-net   │               │
                            │   └───────┬────────┘               │
                            │           │                          │
-                           │   OpenShell gateway :17670           │
-                           │     inference.local → LiteLLM        │
+                           │   OpenShell lab gateway :17670 (mTLS) │
+                           │     inference.local → LiteLLM      │
                            │   ┌────────────┐  ┌────────────┐   │
-                           │   │ NemoClaw   │  │ Portainer  │   │
-                           │   │ (OpenClaw  │  │ (Docker UI)│   │
-                           │   │  sandbox)  │  └────────────┘   │
+                           │   │ claude-code│  │ Portainer  │   │
+                           │   │ sandbox    │  │ (Docker UI)│   │
+                           │   │ (Ready)    │  └────────────┘   │
                            │   └────────────┘                    │
-                           │   ┌────────────┐  ┌────────────┐   │
-                           │   │ claude-code│  │ codex      │   │
-                           │   │ sandbox    │  │ (Phase 5)  │   │
-                           │   └────────────┘  └────────────┘   │
+                           │   NemoClaw (own gw :8080 + 10.89)   │
+                           │   ┌────────────┐                    │
+                           │   │ "director" │ (OpenClaw; Bad GW / provisioning; see todos)
+                           │   └────────────┘                    │
                            │   ai-net (Docker bridge)            │
                            └──────────────────────────────────────┘
 ```
@@ -211,23 +211,24 @@ Add Google Gemini CLI as a sandboxed agent.
 - **`--gemini` flag for `osbox`** — sandboxes use `GOOGLE_GENAI_BASE_URL=https://inference.local`.
 - **Verify** `osbox gemini-1 --gemini --headless`.
 
-## Phase 7 — NemoClaw + Docker migration ✅ DONE (2026-06-13)
+## Phase 7 — NemoClaw + Docker migration ✅ DONE (2026-06-13; director Bad Gateway active item)
 
 **Infrastructure migration complete.** All services migrated from rootless Podman Quadlets
-to Docker Engine + Docker Compose. NemoClaw replaces the hand-rolled OpenClaw Quadlet.
-OpenShell gateway driver switched to Docker.
+to Docker Engine + Docker Compose (with DOCKER_API_VERSION=1.41). OpenShell gateway driver = docker.
+Static file-provider routes added in `traefik/dynamic/` (openclaw-nemoclaw.yml + traefik-dashboard.yml)
+to work around persistent Docker provider "client version 1.24 too old" skew. gateway.env kept simple;
+symlink restore required after nemoclaw. Lab claude-code recreated on explicit 17670 gateway and is Ready.
 
-**Remaining:** `nemoclaw onboard` (interactive wizard). See
-[docs/current/todos.md](../current/todos.md) for the step-by-step sequence.
+**Current remaining in this phase:** NemoClaw director ("director" sandbox) is stuck in provisioning → openclaw.lab.lan returns Bad Gateway (user-reported at session end). Top item in [docs/current/todos.md](../current/todos.md): `nemoclaw director status`, `rebuild --yes`, tail the nemoclaw openshell-gateway.log, ss 18789, route curl, 10.89 alias context. Dual gateways coexist (lab 17670 mTLS 0.0.62 vs nemoclaw 8080 0.0.44).
 
 NemoClaw is NVIDIA's managed stack running OpenClaw inside an OpenShell sandbox:
 ```bash
 curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash
 # During wizard: OpenAI-compatible → LiteLLM key → http://localhost:4000/v1 → claude-sonnet-4-6
+# (Onboard run in session; director create succeeded but client waits for Ready.)
 ```
 
-Dashboard at `http://127.0.0.1:18789` or `nemoclaw <name> connect && openclaw tui`.
-Route through Traefik via file provider in `traefik/dynamic/` (see [traefik/README.md](../../traefik/README.md)).
+Local: `http://127.0.0.1:18789` (or via nemoclaw connect). Public: `https://openclaw.lab.lan` (static route in traefik/dynamic/openclaw-nemoclaw.yml, file provider, hot-reload, no Traefik restart). See [traefik/README.md](../../traefik/README.md) and TROUBLESHOOTING.md.
 
 ## Phase 8 — Podman re-evaluation + NeMo Agent Toolkit
 
@@ -320,7 +321,7 @@ When you add a second/third Optiplex:
 - [x] Phase 3: Subscription ↔ Bedrock per-project switching
 - [x] Phase 4: OpenClaw director (now managed by NemoClaw — Phase 7)
 - [x] Phase 4.5: LiteLLM proxy (Docker Compose, Bedrock routing verified)
-- [x] Phase 7: Docker + NemoClaw migration (infrastructure complete; `nemoclaw onboard` pending)
+- [x] Phase 7: Docker + NemoClaw migration (infrastructure + static routes + claude-code Ready; director provisioning/Bad Gateway + onboard complete — see todos for active troubleshoot)
 - [ ] Phase 5: Codex CLI sandbox
 - [ ] Phase 6: Gemini CLI sandbox
 - [ ] Phase 8: Podman re-evaluation + NeMo Agent Toolkit orchestration

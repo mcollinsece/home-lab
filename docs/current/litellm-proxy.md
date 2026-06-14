@@ -38,6 +38,8 @@ They do not provide the model. Their own OAuth sessions are irrelevant when
 `inference.local` is the endpoint. Swapping backends is a single `litellm/config.yaml`
 change — no sandbox is touched.
 
+**Post-NemoClaw / dual-gateway note**: NemoClaw's director (OpenClaw sandbox) is configured directly against the LiteLLM OpenAI-compatible endpoint during `nemoclaw onboard`. Lab sandboxes (claude-code) continue to use the OpenShell gateway's `inference.local` (routed to the same LiteLLM). Both ultimately hit the single credential boundary here. Director is currently the active troubleshooting target (Bad Gateway on openclaw.lab.lan — see todos.md).
+
 ---
 
 ## Components

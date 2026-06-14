@@ -54,7 +54,8 @@ one line in `litellm/config.yaml`.
 | OpenShell gateway — Docker driver, deny-by-default sandboxes | ✅ live |
 | Claude Code sandbox — Max/Pro subscription | ✅ live |
 | Per-project subscription ↔ Bedrock dual-auth | ✅ live (Phase 3) |
-| **NemoClaw director** (OpenClaw in its own OpenShell sandbox) | ⬜ provisioning / Bad Gateway on openclaw.lab.lan (config staged; see todos) |
+| **NemoClaw director** (OpenClaw in its own OpenShell sandbox) | ⬜ Bad Gateway on openclaw.lab.lan (director provisioning in progress; run `nemoclaw director status` + `rebuild --yes`; see todos) |
+| Claude Code sandbox (lab gateway) | ✅ Ready (recreated post-nemoclaw with `/usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure` + inference.local) |
 | Codex CLI sandbox | ⬜ roadmap (Phase 5) |
 | Gemini CLI sandbox | ⬜ roadmap (Phase 6) |
 | Podman runtime re-evaluation (when NemoClaw supports it) | ⬜ roadmap (Phase 8) |
@@ -80,10 +81,11 @@ Internet
     │           ├── Portainer (Docker Compose) — portainer.lab.lan
     │           ├── LiteLLM (Docker Compose) — litellm.lab.lan — inference proxy → Bedrock
     │           ├── Registry (Docker Compose) — registry.lab.lan :5000
-    │           ├── OpenShell gateway (systemd --user) — :17670, Docker driver
+    │           ├── OpenShell lab gateway (systemd --user) — :17670 (mTLS), Docker driver, 0.0.62
     │           │     inference.local → LiteLLM → Bedrock
-    │           │     ├── NemoClaw sandbox — OpenClaw director :18789
-    │           │     └── agent sandboxes — outbound-only, per-agent policy
+    │           │     └── claude-code (and future codex/gemini) sandboxes — outbound-only, per-agent policy
+    │           ├── NemoClaw (own gateway :8080 plaintext + 10.89.0.1 alias, 0.0.44 pin)
+    │           │     └── "director" sandbox (OpenClaw) — :18789 local → openclaw.lab.lan (static Traefik route)
     │           └── projects/ — one Docker Compose per service on ai-net
     └── ... other devices via AdGuard DHCP
 ```
@@ -160,12 +162,14 @@ git clone <repo> ~/home-lab && ~/home-lab/bootstrap/setup-host.sh
 ```
 
 [`bootstrap/setup-host.sh`](bootstrap/setup-host.sh) is idempotent: base packages,
-Node 22, Docker Engine, OpenShell (pinned `v0.0.62`), gateway.env (simple repo version — symlink must be restored after nemoclaw), mkcert + wildcard
+Node 22, Docker Engine, OpenShell (pinned `v0.0.62`), gateway.env (simple repo version — symlink **must** be restored after nemoclaw), mkcert + wildcard
 cert, and PATH tools (`osbox`, `init-secrets`). **Sensitive/interactive steps are not
-scripted** — credentials, `claude login`, NemoClaw onboard (and post-onboard director creation + lab claude-code recreate using `/usr/bin/openshell` + explicit `--gateway-endpoint` for the 17670 lab gateway) are manual, tracked in
-[docs/current/todos.md](docs/current/todos.md).
+scripted** — credentials, `claude login`, NemoClaw onboard + director provisioning troubleshoot, and post-onboard lab claude-code recreate using `/usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure` (dual-gateway reality) are manual, tracked in
+[docs/current/todos.md](docs/current/todos.md). The script's final banner now includes the exact current post-nemoclaw commands.
 
-**Post-nemoclaw note (from this session):** nemoclaw installs its own 0.0.44 CLI/gateway (on 8080, plaintext) and may overwrite gateway.env or .config. Lab sandboxes (claude-code etc.) must target the separate 17670 gateway (mTLS, restored 0.0.62 binaries) with explicit endpoint. See todos for exact recreate commands and setup-host.sh sync.
+**Post-nemoclaw note (from this session):** `nemoclaw onboard` installs its own 0.0.44 CLI + gateway (8080 plaintext, may overwrite `gateway.env`). The lab gateway (17670 mTLS) uses the restored 0.0.62 binaries and the simple repo `openshell/gateway.env` (OPENSHELL_DRIVERS=docker + BIND=0.0.0.0). Always recreate lab sandboxes (claude-code) with the explicit form:
+`/usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure ... --env ANTHROPIC_BASE_URL=https://inference.local ...`
+After nemoclaw runs: `ln -sfn ~/home-lab/openshell/gateway.env ~/.config/openshell/gateway.env`. Director (on nemoclaw gw) currently shows Bad Gateway — see todos.md for status/rebuild/18789/log/alias details. Static Traefik routes in `traefik/dynamic/` (openclaw-nemoclaw.yml + traefik-dashboard.yml) bypass Docker provider skew.
 
 ## Adding a new service
 

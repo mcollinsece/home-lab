@@ -8,12 +8,14 @@
 #
 #   git clone <this repo> ~/home-lab && ~/home-lab/bootstrap/setup-host.sh
 #
-# What this script does NOT do (manual / sensitive — see docs/current/todos.md):
+# What this script does NOT do (manual / sensitive — see docs/current/todos.md for the live list):
 #   - AdGuard *.lab.lan wildcard (lives on the AdGuard LXC, not this host)
 #   - API credentials (run: init-secrets)
 #   - `claude login` (interactive OAuth — cannot be scripted)
-#   - NemoClaw onboard (interactive wizard — run after init-secrets + docker compose up)
+#   - NemoClaw onboard + director provisioning troubleshoot (openclaw.lab.lan Bad Gateway is the top current item; status / rebuild / logs / 18789 / route curl)
+#   - Post-nemoclaw dual-gateway steps (always restore the simple gateway.env symlink; recreate lab claude-code using explicit /usr/bin + --gateway-endpoint 17670 form — see the heredoc below and todos step 9)
 #   - Install CA cert on client devices (see README.md § 'HTTPS / local CA trust')
+#   - Full end-to-end repro verify after clean checkout (tracked in todos)
 set -euo pipefail
 
 # ---- config ------------------------------------------------------------------
@@ -265,11 +267,21 @@ cat <<'EOF'
        ln -sfn ~/home-lab/openshell/gateway.env ~/.config/openshell/gateway.env
        # (The repo version must stay the simple "driver=docker + BIND=0.0.0.0" one.)
 
-  NOTE: The systemd openshell-gateway service may be taken over by the nemoclaw side after its install.
-  For the lab 17670 gateway you may need a manual start (with the env + /usr/bin binary + TLS certs from
-  ~/.local/state/openshell/tls/) or always use the explicit --gateway-endpoint in lab commands.
-  See docs/current/todos.md for the full current list (including director Bad Gateway troubleshooting,
-  setup-host.sh sync, Traefik Docker provider skew, and the 10.89 alias for the nemoclaw gw).
+  NOTE: Dual-gateway reality after nemoclaw:
+  - Lab side (claude-code etc.): always use /usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure
+    (or the https form) + restore the simple repo gateway.env symlink (step 8 above).
+  - NemoClaw / director: uses its own 0.0.44 gateway (8080 + 10.89.0.1 lo alias + iptables workaround added in session
+    for reachability). The 10.89 rules + alias can be cleaned once director is stable (see todos).
+  - Top remaining: troubleshoot openclaw.lab.lan Bad Gateway (director Provisioning). Run in a TTY:
+      nemoclaw director status
+      nemoclaw director rebuild --yes
+      tail -f ~/.local/state/nemoclaw/openshell-docker-gateway/openshell-gateway.log
+      ss -tlnp | grep 18789
+      curl -k -H 'Host: openclaw.lab.lan' https://localhost/
+    (Pre-placed traefik/dynamic/openclaw-nemoclaw.yml does the route via file provider.)
+  - See docs/current/todos.md (full list + "Verify full end-to-end reproducibility" after any setup-host changes)
+    and bootstrap/TROUBLESHOOTING.md for director Bad Gateway, dual-gw gotchas, Traefik 1.24 skew + static dashboard,
+    and 10.89 details.
 
   Any existing Podman-based OpenShell sandboxes are orphaned by the Docker driver switch.
   Recreate the lab ones using the explicit 17670 form above.
