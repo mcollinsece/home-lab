@@ -7,7 +7,7 @@ See [platform.md](platform.md) for current state and
 
 ## Immediate next steps (do these in order)
 
-> Run these after pulling the latest commit on the homelab VM.
+> Run these after pulling the latest commit on the homelab VM. (Still the recommended post-clone / post-setup flow; valid after the Docker + NemoClaw infrastructure work in this session.)
 
 **1 — Activate Docker group in your shell** (one-time, if you just ran setup-host.sh):
 ```bash
@@ -16,7 +16,7 @@ newgrp docker
 docker ps   # should work without sudo
 ```
 
-**2 — Stop and clean up old Podman services** (decommission the old stack):
+**2 — Stop and clean up old Podman services** (decommission the old stack — run if coming from a pre-migration snapshot):
 ```bash
 systemctl --user stop traefik portainer registry openclaw litellm 2>/dev/null || true
 systemctl --user disable traefik portainer registry openclaw litellm 2>/dev/null || true
@@ -68,13 +68,15 @@ curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash
 #   → API key: <LITELLM_MASTER_KEY from .secrets/litellm.env>
 #   → Base URL: http://localhost:4000/v1
 #   → Model: claude-sonnet-4-6
+# (See new "Troubleshoot director" section below for Bad Gateway / Provisioning issues.)
 ```
 
-**8 — Wire openclaw.lab.lan through Traefik** (after NemoClaw onboard):
+**8 — Wire openclaw.lab.lan through Traefik** (after NemoClaw onboard / director creation):
 ```bash
-# NemoClaw publishes on http://127.0.0.1:18789.
-# Add traefik/openclaw-nemoclaw.yml so it gets HTTPS routing at openclaw.lab.lan:
-cat > ~/home-lab/traefik/openclaw-nemoclaw.yml <<'EOF'
+# (Pre-placed during session at traefik/dynamic/openclaw-nemoclaw.yml — file provider watches the dir.)
+# NemoClaw publishes on http://127.0.0.1:18789 (or via its forward).
+# The yml below (or the pre-placed one) gives HTTPS at openclaw.lab.lan:
+cat > ~/home-lab/traefik/dynamic/openclaw-nemoclaw.yml <<'EOF'
 http:
   routers:
     openclaw:
@@ -88,20 +90,24 @@ http:
         servers:
           - url: "http://127.0.0.1:18789"
 EOF
-# Traefik hot-reloads this (file provider watches the directory).
+# Traefik hot-reloads (file provider). See "Troubleshoot director (openclaw.lab.lan Bad Gateway)" below.
 ```
 
-**9 — Recreate claude-code sandbox with Docker driver**:
+**9 — (Re)create claude-code sandbox on the lab gateway (post-nemoclaw / after any driver or CLI skew)**:
 ```bash
-# The old Podman-based sandbox is orphaned. Create a fresh Docker-backed one:
-openshell sandbox create --name claude-code --no-auto-providers \
-    --policy openshell/policies/claude-code.yaml \
+# Always use the lab gateway explicitly (17670) + the 0.0.62 binary (/usr/bin after restore).
+# The nemoclaw install leaves a 0.0.44 CLI in .local/.npm-global that may take precedence in PATH.
+/usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure sandbox delete claude-code 2>/dev/null || true
+/usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure sandbox create --name claude-code --no-auto-providers \
+    --policy ~/home-lab/openshell/policies/claude-code.yaml \
     --env ANTHROPIC_BASE_URL=https://inference.local \
     --env ANTHROPIC_API_KEY=unused \
     -- claude
-openshell sandbox connect claude-code
-# Inside the sandbox: claude login   (only needed if using subscription auth)
+# (Use https://... if the lab gateway is running with TLS/mTLS certs.)
+# Then: /usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure sandbox connect claude-code
+# Inside: claude login (if using subscription) or just tasks (inference.local → lab gateway → litellm).
 ```
+(See "Update setup-host.sh" and "Dual gateway / post-nemoclaw claude-code" todos below.)
 
 ---
 
@@ -120,54 +126,37 @@ inside an OpenShell sandbox).
 - [x] Update `projects/_template/` — Docker Compose is the standard pattern
 - [x] Update docs
 
-### Remaining (post-migration manual steps)
+### Remaining (post-migration manual steps) + current session todos
 
-- [ ] **NemoClaw onboard** — `curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash`
-      Select "OpenAI-compatible" provider during wizard:
-      ```
-      API key:  $(grep LITELLM_MASTER_KEY ~/home-lab/.secrets/litellm.env | cut -d= -f2)
-      Base URL: http://localhost:4000/v1
-      Model:    claude-sonnet-4-6
-      ```
-- [ ] **NemoClaw → Traefik route** — NemoClaw publishes OpenClaw at `http://127.0.0.1:18789`.
-      Wire `openclaw.lab.lan` through Traefik using the file provider
-      (since NemoClaw-managed Docker containers don't get Traefik labels automatically).
-      Add `traefik/openclaw-nemoclaw.yml`:
-      ```yaml
-      http:
-        routers:
-          openclaw:
-            rule: "Host(`openclaw.lab.lan`)"
-            entrypoints: [websecure]
-            tls: {}
-            service: openclaw
-        services:
-          openclaw:
-            loadBalancer:
-              servers:
-                - url: "http://127.0.0.1:18789"
-      ```
-- [ ] **Wire OpenShell inference routing to LiteLLM** (after `docker compose up -d`):
-      ```bash
-      LITELLM_KEY=$(grep LITELLM_MASTER_KEY ~/home-lab/.secrets/litellm.env | cut -d= -f2)
-      openshell provider create \
-          --name litellm-local --type openai \
-          --credential "OPENAI_API_KEY=${LITELLM_KEY}" \
-          --config OPENAI_BASE_URL=http://localhost:4000/v1
-      openshell inference set --no-verify --provider litellm-local --model claude-sonnet-4-6
-      openshell inference get
-      ```
-- [ ] **Recreate claude-code sandbox** — Podman-based sandbox is orphaned by the Docker
-      driver switch. Create a new Docker-backed sandbox:
-      ```bash
-      openshell sandbox create --name claude-code --no-auto-providers \
-          --policy openshell/policies/claude-code.yaml \
-          --env ANTHROPIC_BASE_URL=https://inference.local \
-          --env ANTHROPIC_API_KEY=unused \
-          -- claude
-      ```
-- [ ] **Verify Portainer connects to Docker** — open `https://portainer.lab.lan` and
-      confirm it shows Docker containers (not a blank/disconnected state).
+- [ ] **Complete / troubleshoot NemoClaw director (openclaw.lab.lan Bad Gateway)**:
+      Re-run or finish `nemoclaw onboard` (or `nemoclaw onboard --recreate-sandbox`).
+      Choose OpenAI-compatible, provide LiteLLM details (key from .secrets, URL, model).
+      Provide sandbox name e.g. "director".
+      Then:
+      - `nemoclaw director status` (expect Ready / Connected, not Provisioning).
+      - If stuck in Provisioning: `nemoclaw director rebuild --yes` (recreates container; workspace preserved).
+      - Check listener: `ss -tlnp | grep 18789` (nemoclaw sets up forward).
+      - Test route: `curl -k -H 'Host: openclaw.lab.lan' https://localhost/` (should stop being 502/Bad Gateway once Ready; the pre-placed `traefik/dynamic/openclaw-nemoclaw.yml` routes it).
+      - Connect: `nemoclaw director connect` (or `nemoclaw <name> connect`).
+      - Watch gateway log: `tail -f /home/debian/.local/state/nemoclaw/openshell-docker-gateway/openshell-gateway.log` (look for supervisor relay, "CreateSandbox", GetSandbox, no "stopping" deserial errors — we cleaned old containers).
+      - Note: nemoclaw pins 0.0.44 (its gateway on 8080 plaintext); lab uses separate 17670 (mTLS). The 10.89.0.1 lo alias + iptables (added during session) are required for nemoclaw gw reachability from its bridge.
+- [ ] **Update bootstrap/setup-host.sh for full reproducibility**:
+      Script is mostly good (Docker, OpenShell 0.0.62, gateway.env symlink to simple repo version, compose up if secrets, tools). But sync the final manual-steps banner and post-nemoclaw flow:
+      - After `nemoclaw onboard`, always restore `ln -sfn ~/home-lab/openshell/gateway.env ~/.config/openshell/gateway.env` (nemoclaw may write its full 8080 config).
+      - Recreate lab claude-code **using the lab gateway explicitly**:
+        `/usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure sandbox delete claude-code || true`
+        `/usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure sandbox create --name claude-code --no-auto-providers --policy ~/home-lab/openshell/policies/claude-code.yaml --env ANTHROPIC_BASE_URL=https://inference.local --env ANTHROPIC_API_KEY=unused -- claude`
+        (Use /usr/bin for 0.0.62 + --env support; plain `openshell` may resolve to nemoclaw's 0.0.44 in PATH after its install.)
+      - Start/ensure lab gateway on 17670 if the service is now tied to nemoclaw side (manual start with env + /usr/bin/openshell-gateway --bind-address 0.0.0.0 --port 17670 + TLS certs from ~/.local/state/openshell/tls/ as needed).
+      - Note dual-gateway reality and that nemoclaw will install its own 0.0.44 CLI/gateway.
+      - (I started targeted updates to the script's final banner in this session; finish the full sync.)
+- [ ] **Verify full end-to-end reproducibility** after any setup-host.sh update: clean VM, run setup-host + init-secrets + docker compose up (if needed) + nemoclaw onboard (with details) + the two recreate commands above. Confirm: both gateways healthy, claude-code Ready with inference.local, director Ready, routes work (including openclaw.lab.lan and traefik.lab.lan/dashboard/), inference smoke from both sides, policies effective.
+- [ ] **Traefik Docker provider version skew**: Still logs "client version 1.24 too old" (min 1.40) even with DOCKER_API_VERSION=1.41 in compose (env is present after force-recreate; SDK in v3.3 image reports old). Rely on static files in dynamic/ for critical routers (we added traefik-dashboard.yml as workaround; openclaw-nemoclaw.yml already static). Other label-based services may be affected until fixed (newer Traefik image, socket proxy, or accept and document).
+- [ ] **Clean up 10.89 alias + iptables** (added as nemoclaw gw workaround during session) once director is stable and no longer needed.
+- [ ] **Persist lab gateway on 17670** (currently sometimes manual start after nemoclaw takes over the systemd service/metadata). Consider a dedicated user service or script, or keep using explicit --gateway-endpoint in all lab commands.
+- [ ] Update claude-code examples/docs everywhere to prefer explicit lab gateway endpoint post-nemoclaw.
+
+(Immediate 1-9 steps below remain the recommended post-clone / post-setup flow; they are still valid.)
 
 ---
 

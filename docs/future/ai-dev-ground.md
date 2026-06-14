@@ -16,7 +16,7 @@ with per-project switching between Claude Max/Pro subscription and Bedrock.
 |---|---|---|
 | **OpenShell** ([repo](https://github.com/NVIDIA/OpenShell)) | Open-source sandbox runtime (Apache 2.0, alpha). Gateway + per-sandbox containers, deny-by-default YAML network/filesystem/process policies, credential providers, inference router. | The foundation. Runs Claude Code, Codex, and other agents unmodified. |
 | **LiteLLM** ([repo](https://github.com/BerriAI/litellm)) | OpenAI-compatible inference proxy. Single credential boundary for all model backends. | The inference hub. All agents and NemoClaw route through `inference.local` → LiteLLM → Bedrock (today). |
-| **NemoClaw** ([repo](https://github.com/NVIDIA/NemoClaw), [docs](https://docs.nvidia.com/nemoclaw/latest/)) | NVIDIA's one-command stack for running **OpenClaw** inside an OpenShell sandbox. Docker-based. | Phase 7 ✅ (infrastructure complete, onboard pending). Replaces the hand-rolled OpenClaw Quadlet. |
+| **NemoClaw** ([repo](https://github.com/NVIDIA/NemoClaw), [docs](https://docs.nvidia.com/nemoclaw/latest/)) | NVIDIA's one-command stack for running **OpenClaw** inside an OpenShell sandbox. Docker-based. | Phase 7 ✅ (infrastructure + static routes + inference config staged; director sandbox provisioning/troubleshoot Bad Gateway in progress). Replaces the hand-rolled OpenClaw Quadlet. Lab uses separate 17670 gateway; nemoclaw manages its own 8080 gw + 0.0.44 pin. |
 | **NeMo Agent Toolkit** ([repo](https://github.com/NVIDIA/NeMo-Agent-Toolkit)) | Python library for orchestrating teams of agents across frameworks. | Phase 8+. The orchestration brain that coordinates sandboxed agents. |
 
 Key facts:
@@ -227,7 +227,7 @@ curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash
 ```
 
 Dashboard at `http://127.0.0.1:18789` or `nemoclaw <name> connect && openclaw tui`.
-Route through Traefik via file provider (see [traefik/README.md](../../traefik/README.md)).
+Route through Traefik via file provider in `traefik/dynamic/` (see [traefik/README.md](../../traefik/README.md)).
 
 ## Phase 8 — Podman re-evaluation + NeMo Agent Toolkit
 

@@ -55,24 +55,28 @@ and `OPENSHELL_BIND_ADDRESS=0.0.0.0`. mTLS still gates the wider bind.
 ~/home-lab/bootstrap/setup-host.sh   # installs OpenShell + links gateway.env
 ```
 
-## (Re)create the Claude Code sandbox
+## (Re)create the Claude Code sandbox (post-nemoclaw / dual-gateway reality)
 
-Sandboxes use `inference.local` — no raw credentials in the sandbox:
+**Important (from this migration session):** After `nemoclaw onboard`, nemoclaw installs its own 0.0.44 CLI in `~/.local/bin` / `~/.npm-global/bin` and its own gateway on 8080 (plaintext). The lab uses a separate gateway on 17670 (mTLS, restored 0.0.62 binaries via re-install of the package). Always target the **lab gateway explicitly** for claude-code etc. (or restore the simple `gateway.env` symlink and use `/usr/bin/openshell`).
 
 ```bash
-openshell sandbox create --name claude-code --no-auto-providers \
+# Delete + create using the lab 17670 gateway + 0.0.62 binary + full inference.local envs
+/usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure sandbox delete claude-code 2>/dev/null || true
+/usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure sandbox create --name claude-code --no-auto-providers \
     --policy ~/home-lab/openshell/policies/claude-code.yaml \
     --env ANTHROPIC_BASE_URL=https://inference.local \
     --env ANTHROPIC_API_KEY=unused \
     -- claude
-# First run only — only needed if using subscription auth alongside inference.local:
-openshell sandbox connect claude-code
-#   inside: claude login   (browser OAuth)
+# (Use https://... + no --insecure if the lab gateway is running with its TLS certs.)
+# Connect: /usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure sandbox connect claude-code
+# Inside: claude login (if subscription) or tasks (inference.local is routed by the lab gateway → LiteLLM).
 ```
 
-> **Note:** The previous pattern (`--env AWS_ACCESS_KEY_ID=…`) is deprecated.
+> **Note:** The previous pattern (raw AWS in --env or relying on plain `openshell`) is deprecated.
 > Inference now routes through `inference.local` → LiteLLM → Bedrock. The sandbox
-> holds no real credentials.
+> holds no real credentials. After nemoclaw, restore the symlink if needed:
+> `ln -sfn ~/home-lab/openshell/gateway.env ~/.config/openshell/gateway.env`
+> (the repo version must stay the simple driver+bind one; nemoclaw may write its full 8080 config).
 
 ## NemoClaw sandbox
 

@@ -1,5 +1,5 @@
 # Traefik STATIC configuration.
-# Routing is DYNAMIC and comes entirely from container labels (Podman provider),
+# Routing is DYNAMIC and comes entirely from container labels (Docker provider),
 # so adding a service never means editing this file.
 global:
   checkNewVersion: false
@@ -29,7 +29,7 @@ entryPoints:
 
 providers:
   file:
-    filename: /etc/traefik/tls.yml
+    directory: /etc/traefik/dynamic
     watch: true
   docker:
     # Docker Engine socket (rootful daemon, mounted ro in docker/compose.yml).

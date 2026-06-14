@@ -54,7 +54,7 @@ one line in `litellm/config.yaml`.
 | OpenShell gateway — Docker driver, deny-by-default sandboxes | ✅ live |
 | Claude Code sandbox — Max/Pro subscription | ✅ live |
 | Per-project subscription ↔ Bedrock dual-auth | ✅ live (Phase 3) |
-| **NemoClaw** — OpenClaw in OpenShell sandbox, routed inference | ⬜ onboard pending (Phase 7) |
+| **NemoClaw director** (OpenClaw in its own OpenShell sandbox) | ⬜ provisioning / Bad Gateway on openclaw.lab.lan (config staged; see todos) |
 | Codex CLI sandbox | ⬜ roadmap (Phase 5) |
 | Gemini CLI sandbox | ⬜ roadmap (Phase 6) |
 | Podman runtime re-evaluation (when NemoClaw supports it) | ⬜ roadmap (Phase 8) |
@@ -149,9 +149,9 @@ Cert expires **2028-09-13**; CA valid until **2036-06-13**.
 
 | Doc | What it covers |
 |---|---|
-| [openshell/README.md](openshell/README.md) | Agent sandboxes — gateway config, sandbox lifecycle, inference.local |
-| [traefik/README.md](traefik/README.md) | How to expose a Docker Compose service via Traefik labels |
-| [bootstrap/TROUBLESHOOTING.md](bootstrap/TROUBLESHOOTING.md) | OpenShell/Docker failure modes and fixes |
+| [openshell/README.md](openshell/README.md) | Agent sandboxes — gateway config, sandbox lifecycle, inference.local (note dual gateways post-nemoclaw; use explicit endpoint for lab) |
+| [traefik/README.md](traefik/README.md) | How to expose a Docker Compose service via Traefik labels (static files in dynamic/ for dashboard + openclaw; Docker provider has persistent client-version errors) |
+| [bootstrap/TROUBLESHOOTING.md](bootstrap/TROUBLESHOOTING.md) | OpenShell/Docker failure modes and fixes (added: openclaw Bad Gateway / director Provisioning, dual-gateway gotchas, post-nemoclaw gateway restore) |
 
 ## Reproduce the host
 
@@ -160,10 +160,12 @@ git clone <repo> ~/home-lab && ~/home-lab/bootstrap/setup-host.sh
 ```
 
 [`bootstrap/setup-host.sh`](bootstrap/setup-host.sh) is idempotent: base packages,
-Node 22, Docker Engine, OpenShell (pinned `v0.0.62`), gateway.env, mkcert + wildcard
+Node 22, Docker Engine, OpenShell (pinned `v0.0.62`), gateway.env (simple repo version — symlink must be restored after nemoclaw), mkcert + wildcard
 cert, and PATH tools (`osbox`, `init-secrets`). **Sensitive/interactive steps are not
-scripted** — credentials, `claude login`, and NemoClaw onboard are manual, tracked in
+scripted** — credentials, `claude login`, NemoClaw onboard (and post-onboard director creation + lab claude-code recreate using `/usr/bin/openshell` + explicit `--gateway-endpoint` for the 17670 lab gateway) are manual, tracked in
 [docs/current/todos.md](docs/current/todos.md).
+
+**Post-nemoclaw note (from this session):** nemoclaw installs its own 0.0.44 CLI/gateway (on 8080, plaintext) and may overwrite gateway.env or .config. Lab sandboxes (claude-code etc.) must target the separate 17670 gateway (mTLS, restored 0.0.62 binaries) with explicit endpoint. See todos for exact recreate commands and setup-host.sh sync.
 
 ## Adding a new service
 

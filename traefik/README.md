@@ -64,13 +64,18 @@ Verify without DNS:
 curl -k -H 'Host: grafana.lab.lan' https://localhost/
 ```
 
-## NemoClaw / static routes
+## NemoClaw / static routes + dashboard workaround
 
-NemoClaw-managed containers don't get Docker labels. Route them via the file provider
-instead — add a file to the `traefik/` directory (Traefik watches it and hot-reloads):
+NemoClaw-managed containers (and the dashboard) don't reliably get (or the Docker provider doesn't load) labels because of a persistent "client version 1.24 too old" error with the current Docker daemon (even with DOCKER_API_VERSION=1.41). We rely on the file provider (directory: /etc/traefik/dynamic, watch: true) + static .yml files.
+
+Pre-placed during session:
+- `traefik/dynamic/openclaw-nemoclaw.yml` (routes openclaw.lab.lan → 127.0.0.1:18789; see todos for Bad Gateway troubleshooting).
+- `traefik/dynamic/traefik-dashboard.yml` (static router for traefik.lab.lan → api@internal; added so the dashboard works even when the Docker provider is broken).
+
+Example (the openclaw one):
 
 ```yaml
-# traefik/openclaw-nemoclaw.yml
+# traefik/dynamic/openclaw-nemoclaw.yml
 http:
   routers:
     openclaw:
@@ -85,7 +90,7 @@ http:
           - url: "http://127.0.0.1:18789"
 ```
 
-No restart needed — Traefik hot-reloads file provider changes.
+No restart needed — Traefik hot-reloads file provider changes. The original container labels for the dashboard are still in docker/compose.yml but are secondary; the static file takes precedence for reliability.
 
 ## Update Traefik
 

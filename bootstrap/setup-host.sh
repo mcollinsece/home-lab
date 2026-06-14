@@ -213,7 +213,7 @@ else
   echo "  docker compose -f docker/compose.yml up -d"
 fi
 
-say "Done. Manual steps remaining (see docs/current/todos.md):"
+say "Done. Manual steps remaining (see docs/current/todos.md for the full current list, including post-nemoclaw director troubleshooting and lab claude-code recreate):"
 cat <<'EOF'
 
   1. Credentials (cannot be scripted):
@@ -238,26 +238,40 @@ cat <<'EOF'
        #   API key:    $(grep LITELLM_MASTER_KEY ~/home-lab/.secrets/litellm.env | cut -d= -f2)
        #   Base URL:   http://localhost:4000/v1
        #   Model:      claude-sonnet-4-6
-       # After onboard, access OpenClaw at http://127.0.0.1:18789
-       # or: nemoclaw <sandbox-name> connect && openclaw tui
+       # After onboard (and any director provisioning), access at http://127.0.0.1:18789 or via openclaw.lab.lan.
+       # IMPORTANT: after nemoclaw, restore the simple gateway.env symlink (see below) and
+       # recreate the lab claude-code sandbox using /usr/bin/openshell + explicit 17670 endpoint
+       # (nemoclaw pins its own 0.0.44 CLI + gateway on 8080 and may overwrite .config).
 
-  6. Wire OpenShell inference routing to LiteLLM (one-time, after litellm is running):
+  6. Wire OpenShell inference routing to LiteLLM (one-time, after litellm is running; use explicit lab gateway):
        LITELLM_KEY=$(grep LITELLM_MASTER_KEY ~/home-lab/.secrets/litellm.env | cut -d= -f2)
-       openshell provider create \
+       /usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure provider create \
            --name litellm-local --type openai \
            --credential "OPENAI_API_KEY=${LITELLM_KEY}" \
            --config OPENAI_BASE_URL=http://localhost:4000/v1
-       openshell inference set --no-verify --provider litellm-local --model claude-sonnet-4-6
-       openshell inference get   # confirm provider=litellm-local, model=claude-sonnet-4-6
+       /usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure inference set --no-verify --provider litellm-local --model claude-sonnet-4-6
+       /usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure inference get
 
-  7. First claude-code sandbox (post-NemoClaw; uses inference.local):
-       openshell sandbox create --name claude-code --no-auto-providers \
-           --policy openshell/policies/claude-code.yaml \
+  7. (Re)create claude-code sandbox on the lab gateway (post-nemoclaw / after any skew; uses inference.local):
+       /usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure sandbox delete claude-code 2>/dev/null || true
+       /usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure sandbox create --name claude-code --no-auto-providers \
+           --policy ~/home-lab/openshell/policies/claude-code.yaml \
            --env ANTHROPIC_BASE_URL=https://inference.local \
            --env ANTHROPIC_API_KEY=unused \
            -- claude
+       # Connect the same way (explicit endpoint). Inside: claude login if using subscription.
 
-  NOTE: Any existing Podman-based OpenShell sandboxes are orphaned by the Docker
-  driver switch in step 8 above. Recreate them using `openshell sandbox create`.
+  8. (After nemoclaw) restore the simple lab gateway.env symlink (nemoclaw may write its full 8080 config):
+       ln -sfn ~/home-lab/openshell/gateway.env ~/.config/openshell/gateway.env
+       # (The repo version must stay the simple "driver=docker + BIND=0.0.0.0" one.)
+
+  NOTE: The systemd openshell-gateway service may be taken over by the nemoclaw side after its install.
+  For the lab 17670 gateway you may need a manual start (with the env + /usr/bin binary + TLS certs from
+  ~/.local/state/openshell/tls/) or always use the explicit --gateway-endpoint in lab commands.
+  See docs/current/todos.md for the full current list (including director Bad Gateway troubleshooting,
+  setup-host.sh sync, Traefik Docker provider skew, and the 10.89 alias for the nemoclaw gw).
+
+  Any existing Podman-based OpenShell sandboxes are orphaned by the Docker driver switch.
+  Recreate the lab ones using the explicit 17670 form above.
 
 EOF

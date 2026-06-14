@@ -1,0 +1,12 @@
+http:
+  routers:
+    openclaw:
+      rule: "Host(`openclaw.lab.lan`)"
+      entrypoints: [websecure]
+      tls: {}
+      service: openclaw
+  services:
+    openclaw:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:18789"

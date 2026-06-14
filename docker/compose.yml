@@ -44,10 +44,14 @@ services:
       # Static config (entrypoints, dashboard, docker provider).
       - ../traefik/traefik.yml:/etc/traefik/traefik.yml:ro
       # Dynamic TLS config + wildcard cert (mkcert, expires 2028-09-13).
-      - ../traefik/tls.yml:/etc/traefik/tls.yml:ro
+      # Dynamic file provider dir (watched): contains 00-tls.yml + any extra static routes (e.g. openclaw-nemoclaw.yml for nemo).
+      - ../traefik/dynamic:/etc/traefik/dynamic:ro
       - ../traefik/certs:/etc/traefik/certs:ro
     networks:
       - ai-net
+    environment:
+      # Help traefik's internal docker client talk to very new host Docker daemon (API version skew warning in logs).
+      - DOCKER_API_VERSION=1.41
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.dashboard.rule=Host(`traefik.lab.lan`)"

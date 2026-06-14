@@ -69,8 +69,9 @@
 | Portainer | Docker Compose | `https://portainer.lab.lan` | ✅ |
 | Registry | Docker Compose | `registry.lab.lan` — Docker Registry v2, `:5000` insecure | ✅ |
 | LiteLLM | Docker Compose | `https://litellm.lab.lan`, `:4000` internal — unified inference proxy → Bedrock | ✅ |
-| OpenShell gateway | systemd `--user` service | `0.0.0.0:17670` (mTLS), Docker driver | ✅ |
-| OpenClaw | NemoClaw-managed sandbox | `http://127.0.0.1:18789` (local) / `openclaw.lab.lan` (via Traefik file route) | ⬜ pending NemoClaw onboard |
+| OpenShell gateway (lab) | systemd `--user` (or manual) | `0.0.0.0:17670` (mTLS), Docker driver, 0.0.62 binaries | ✅ |
+| OpenShell gateway (nemoclaw) | managed by nemoclaw | `127.0.0.1:8080` (and 10.89.0.1:8080 alias), plaintext, 0.0.44 | ✅ (for director) |
+| OpenClaw director | NemoClaw-managed sandbox ("director") | `http://127.0.0.1:18789` (local) / `openclaw.lab.lan` (via pre-placed Traefik file route) | ⬜ Bad Gateway / provisioning (see todos.md — config staged, inference to litellm-local) |
 
 ### Agent sandbox architecture
 
@@ -79,11 +80,14 @@ NemoClaw (host CLI — manages OpenClaw lifecycle)
    └── OpenClaw (OpenShell sandbox — agent director)
          └── LiteLLM (:4000) ← inference backend (Bedrock via Docker Compose)
 
-OpenShell gateway (:17670, Docker driver)
-  inference.local → litellm-local provider → http://localhost:4000/v1
-         ├── claude-code sandbox  (worker — osbox --claudeai)
-         ├── codex sandbox        (worker — osbox --codex,   Phase 5)
-         └── gemini sandbox       (worker — osbox --gemini,  Phase 6)
+OpenShell lab gateway (17670, Docker driver, mTLS)
+  inference.local → litellm-local → http://localhost:4000/v1
+         ├── claude-code sandbox (Ready, full --env ANTHROPIC_*=inference.local; recreate with /usr/bin + explicit endpoint post-nemoclaw)
+         ├── codex / gemini (Phase 5/6)
+
+Nemoclaw gateway (8080, Docker driver, plaintext, 0.0.44 pinned)
+  inference.local / compatible-endpoint → litellm (or other)
+         └── director sandbox ("director" / OpenClaw; provisioning/troubleshoot Bad Gateway — see todos)
 ```
 
 **NemoClaw** is NVIDIA's managed stack that runs OpenClaw inside an OpenShell sandbox.
@@ -179,7 +183,7 @@ Outstanding work lives in **[todos.md](todos.md)**. Current state:
 - ✅ Phase 1 (Node 22) · Phase 2 (OpenShell + Claude Code subscription) · `setup-host.sh` · AdGuard `*.lab.lan` · Phase 3 (Bedrock dual-auth)
 - ✅ Phase 4 — OpenClaw live (previously as Podman Quadlet; migrated to NemoClaw in Phase 7)
 - ✅ Phase 4.5 — LiteLLM proxy live (Bedrock routing verified; migrated to Docker Compose)
-- ✅ Phase 7 — **Docker + NemoClaw migration complete** (2026-06-13): All services moved from Podman Quadlets to Docker Compose; NemoClaw onboard pending (interactive)
+- ✅ Phase 7 — **Docker + NemoClaw migration complete** (2026-06-13): Core services + compose + Traefik dynamic/ + gateway.env + inference wiring + lab claude-code recreate on 17670. Director config staged via onboard; sandbox provisioning had long "still creating"/stream exit 1/stuck Provisioning → currently Bad Gateway on openclaw.lab.lan (see todos for rebuild, logs, route troubleshooting). Dual-gateway reality (lab 17670 vs nemoclaw 8080).
 - ⬜ Phase 5 — Codex CLI sandbox (`osbox --codex`)
 - ⬜ Phase 6 — Gemini CLI sandbox (`osbox --gemini`)
 - ⬜ Phase 8 — Evaluate Podman support in future NemoClaw releases; restore Podman-based services if supported
