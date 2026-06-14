@@ -48,6 +48,10 @@ network_policies:
     binaries:
       - { path: /usr/local/bin/claude }
       - { path: /usr/bin/claude }
+      # Support for claude-code-openai-wrapper (Python SDK) running the agent
+      - { path: /usr/bin/python3 }
+      - { path: /usr/bin/python }
+      - { path: /usr/local/bin/python3 }
 
   # Amazon Bedrock (opt-in per project). The `us.` cross-region inference
   # profiles fan out across us-east-1 / us-east-2 / us-west-2 regardless of the
@@ -67,3 +71,7 @@ network_policies:
     binaries:
       - { path: /usr/local/bin/claude }
       - { path: /usr/bin/claude }
+      # Support for claude-code-openai-wrapper (Python SDK) running the agent
+      - { path: /usr/bin/python3 }
+      - { path: /usr/bin/python }
+      - { path: /usr/local/bin/python3 }
