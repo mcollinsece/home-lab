@@ -71,24 +71,26 @@
 | LiteLLM | Docker Compose | `https://litellm.lab.lan`, `:4000` internal — unified inference proxy → Bedrock | ✅ |
 | OpenShell gateway (lab) | systemd `--user` (or manual) | `0.0.0.0:17670` (mTLS), Docker driver, 0.0.62 binaries | ✅ |
 | OpenShell gateway (nemoclaw) | managed by nemoclaw | `127.0.0.1:8080` (and 10.89.0.1:8080 alias), plaintext, 0.0.44 | ✅ (for director) |
-| OpenClaw director | NemoClaw-managed sandbox ("director") | `http://127.0.0.1:18789` (local) / `openclaw.lab.lan` (via pre-placed Traefik file route) | ⬜ Bad Gateway (user-reported); provisioning / "still creating" after onboard. Use `nemoclaw director status`, `rebuild --yes`, gateway log, 18789 check, route curl (see todos.md). Inference staged to litellm-local. |
+| OpenClaw director | NemoClaw-managed sandbox ("director") | `openclaw.lab.lan` (Traefik file route → socat relay `172.18.0.1:18789` → SSH tunnel `127.0.0.1:18789` → director) | ✅ live — `litellm/claude-sonnet-4-6` (Bedrock via LiteLLM); no auth token; CORS/provider patches persistent via `nemoclaw-director-control-ui` probe service |
 
 ### Agent sandbox architecture
 
 ```
 NemoClaw (host CLI — manages OpenClaw lifecycle)
-   └── OpenClaw (OpenShell sandbox — agent director)
-         └── LiteLLM (:4000) ← inference backend (Bedrock via Docker Compose)
+   └── director sandbox (OpenClaw — openclaw.lab.lan)
+         inference backend: litellm/claude-sonnet-4-6 → LiteLLM (:4000) → AWS Bedrock
+
+Routing chain for openclaw.lab.lan:
+  Browser → Traefik (Docker) → socat relay 172.18.0.1:18789 → SSH tunnel 127.0.0.1:18789 → director sandbox
+  (socat relay needed because Traefik cannot reach host loopback 127.0.0.1 from inside Docker)
 
 OpenShell lab gateway (17670, Docker driver, mTLS, 0.0.62 /usr/bin)
   inference.local → litellm-local → http://localhost:4000/v1
-         └── claude-code sandbox (Ready; full --env ANTHROPIC_BASE_URL=https://inference.local etc; always recreate post-nemoclaw with explicit:
-             /usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure sandbox create ... -- claude )
+         └── claude-code sandbox (Ready; --env ANTHROPIC_BASE_URL=https://inference.local)
          (codex / gemini Phase 5/6)
 
 NemoClaw gateway (8080 plaintext + 10.89.0.1 lo alias, 0.0.44 pinned, managed)
-  inference.local / OpenAI-compatible → litellm
-         └── director sandbox ("director" / OpenClaw; currently Bad Gateway / Provisioning — top item in todos.md; 10.89 alias+iptables session workaround for reachability)
+         └── director sandbox (OpenClaw; ✅ live)
 ```
 
 **NemoClaw** is NVIDIA's managed stack that runs OpenClaw inside an OpenShell sandbox.
@@ -184,7 +186,7 @@ Outstanding work lives in **[todos.md](todos.md)**. Current state:
 - ✅ Phase 1 (Node 22) · Phase 2 (OpenShell + Claude Code subscription) · `setup-host.sh` · AdGuard `*.lab.lan` · Phase 3 (Bedrock dual-auth)
 - ✅ Phase 4 — OpenClaw live (previously as Podman Quadlet; migrated to NemoClaw in Phase 7)
 - ✅ Phase 4.5 — LiteLLM proxy live (Bedrock routing verified; migrated to Docker Compose)
-- ✅ Phase 7 — **Docker + NemoClaw migration complete** (2026-06-13): Full infra (Docker compose, Traefik Docker+file providers + static openclaw-nemoclaw.yml + traefik-dashboard.yml for dashboard bypass, DOCKER_API_VERSION=1.41, gateway.env simple, inference to litellm-local, 0.0.62 lab gw, claude-code Ready on explicit 17670). `nemoclaw onboard` run (director "director" created with managed_inference policy); currently Bad Gateway / provisioning (user: 502 on openclaw.lab.lan). See todos.md (top remaining: status/rebuild/logs/18789/curl/alias; also bootstrap repro sync + verify + provider skew + 10.89 cleanup). Dual-gateway reality fully documented (lab 17670 mTLS vs nemoclaw 8080).
+- ✅ Phase 7 — **Docker + NemoClaw migration + OpenClaw director fully live** (2026-06-13/14): Traefik, Portainer, Registry, LiteLLM on Docker Compose; `openclaw.lab.lan` live with `litellm/claude-sonnet-4-6` backend (Bedrock via LiteLLM); no auth token; CORS/provider/shim patches persistent via `nemoclaw-director-control-ui` probe service. Key fix: socat relay in probe script bridges the Docker bridge network to the NemoClaw SSH tunnel (Traefik cannot reach host loopback from inside a container). Dual-gateway reality documented (lab 17670 mTLS vs NemoClaw 8080).
 - ⬜ Phase 5 — Codex CLI sandbox (`osbox --codex`)
 - ⬜ Phase 6 — Gemini CLI sandbox (`osbox --gemini`)
 - ⬜ Phase 8 — Evaluate Podman support in future NemoClaw releases; restore Podman-based services if supported
@@ -209,10 +211,11 @@ Internet
     │           ├── LiteLLM (Docker Compose) — litellm.lab.lan — inference proxy → Bedrock
     │           ├── OpenShell gateway (systemd --user) — :17670 Docker driver, deny-by-default
     │           │     inference.local → litellm-local → http://localhost:4000/v1
-    │           │     ├── NemoClaw sandbox (Docker) — OpenClaw director :18789
     │           │     ├── claude-code sandbox (Docker) — outbound-only, inference.local
     │           │     ├── codex sandbox (Phase 5)
     │           │     └── gemini sandbox (Phase 6)
+    │           ├── NemoClaw gateway (:8080) + director sandbox (OpenClaw) — openclaw.lab.lan
+    │           │     socat relay :172.18.0.1:18789 → SSH tunnel :127.0.0.1:18789 → director
     │           └── projects/ — one Docker Compose per service on ai-net
     └── ... other devices via AdGuard DHCP
 ```

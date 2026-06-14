@@ -132,18 +132,43 @@ Harmless — just means no TTY. Node still installs.
 
 ## New issues surfaced during the Docker + NemoClaw migration session
 
-### openclaw.lab.lan Bad Gateway (or 502) / director stuck in Provisioning
-- Symptom: long "Still creating sandbox in gateway..." (hundreds of seconds), "Create stream exited with code 1 after sandbox was created.", `nemoclaw director status` says Provisioning (or "not present"), no 18789 listener, route 502.
-- Cause: async provisioning after the create (supervisor relay inside the container, OpenClaw startup, policy). The non-TTY create stream often exits 1 (harmless for the sandbox itself). Legacy Podman networks left "10.89" subnets that confused the nemoclaw gateway bind (we added 10.89.0.1 lo alias + iptables as workaround). Old docker "stopping" state deserial errors in the 0.0.44 driver.
-- Fix / troubleshooting (run in shell with PATH + newgrp):
-  - `nemoclaw director status` (note the exact phase and any "Connected: no").
-  - `tail -f /home/debian/.local/state/nemoclaw/openshell-docker-gateway/openshell-gateway.log` (watch ListSandboxes, GetSandbox, supervisor relay, "CreateSandbox", any "stopping" errors).
-  - If stuck: `nemoclaw director rebuild --yes` (recreates the container; workspace preserved). We cleaned old containers in the session.
-  - Check listener/forward: `ss -tlnp | grep 18789`.
-  - Test: `curl -k -H 'Host: openclaw.lab.lan' https://localhost/` (should become non-502 once Ready).
-  - The pre-placed `traefik/dynamic/openclaw-nemoclaw.yml` (file provider) does the routing once 18789 is forwarded.
-  - Connect: `nemoclaw director connect`.
-  - Note the dual-gateway: director lives on the nemoclaw 8080 gateway (its 10.89 alias); lab sandboxes on 17670.
+### openclaw.lab.lan 502 Bad Gateway — Traefik cannot reach host loopback (root cause + fix)
+
+**The primary fix** (applied 2026-06-14, now in `bootstrap/nemoclaw-director-probe.sh`):
+
+NemoClaw's `director connect --probe-only` binds the SSH tunnel on `127.0.0.1:18789` — the **host's loopback only**. Traefik runs inside a Docker container. From inside that container, `127.0.0.1` is the *container's* loopback, not the host's. So `http://127.0.0.1:18789` in the Traefik static route silently goes nowhere → 502.
+
+**Fix:** the probe script starts a `socat` relay that listens on `172.18.0.1:18789` (the Docker bridge gateway IP, reachable from all containers on `ai-net`) and forwards to `127.0.0.1:18789` (the SSH tunnel). The Traefik static route points to `http://172.18.0.1:18789`. Both socat and the SSH tunnel live in the probe service's cgroup and restart together on boot or `nemoclaw director rebuild`.
+
+If you see 502 and the probe service is running:
+```bash
+# Is socat running?
+pgrep -a socat | grep 18789
+# Expected: socat TCP-LISTEN:18789,bind=172.18.0.1,...
+
+# Is the static route using the right URL?
+grep 18789 ~/home-lab/traefik/dynamic/openclaw-nemoclaw.yml
+# Must be: http://172.18.0.1:18789  (NOT 127.0.0.1)
+
+# Is the SSH tunnel up?
+ss -tlnp | grep 18789   # expect 127.0.0.1:18789
+
+# Restart the probe (re-runs all patches + re-starts socat + re-establishes SSH tunnel):
+systemctl --user restart nemoclaw-director-control-ui
+```
+
+### openclaw.lab.lan Bad Gateway — director not yet provisioned
+
+Separate from the Traefik routing issue above; can occur during initial setup or after a rebuild:
+
+- Symptom: `nemoclaw director status` says Provisioning (or "not present"), no 18789 listener, `ss -tlnp | grep 18789` empty.
+- Cause: async provisioning after the create (supervisor relay inside the container, OpenClaw startup, policy). The non-TTY create stream often exits 1 (harmless for the sandbox itself).
+- Fix:
+  - `nemoclaw director status` — note the exact phase and any "Connected: no".
+  - `tail -f /home/debian/.local/state/nemoclaw/openshell-docker-gateway/openshell-gateway.log` — watch CreateSandbox/supervisor relay.
+  - If stuck: `nemoclaw director rebuild --yes` (recreates the container; workspace preserved).
+  - Once Ready: `systemctl --user restart nemoclaw-director-control-ui` (re-runs patches + wires port forward).
+  - Test: `curl -k -H 'Host: openclaw.lab.lan' https://localhost/ -o /dev/null -w "%{http_code}\n"` — expect 200.
 
 ### Dual-gateway / post-nemoclaw claude-code or lab commands use the wrong gateway (or 0.0.44 CLI)
 - Symptom: `openshell sandbox ...` or status talks to the nemoclaw 8080 gateway; claude-code create fails or lacks `inference.local` envs; "provider already exists" or transport errors.

@@ -256,5 +256,22 @@ DOCKERWRAP
 
 fi
 
+# ── Bridge relay: Traefik container → SSH tunnel ────────────────────────────
+# nemoclaw director connect --probe-only binds the SSH tunnel on 127.0.0.1:18789
+# (host loopback only). Traefik runs inside a Docker container and cannot reach
+# the host's 127.0.0.1. socat listens on the Docker bridge gateway IP
+# (172.18.0.1 for ai-net) and relays to the SSH tunnel — matching the static
+# route in traefik/dynamic/openclaw-nemoclaw.yml.
+say "Starting socat bridge relay (Traefik container → SSH tunnel)..."
+_AINETGW=$(docker network inspect ai-net --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null | head -1 | tr -d ' ')
+if [[ -n "$_AINETGW" ]]; then
+  pkill -f "socat TCP-LISTEN:18789,bind=${_AINETGW}" 2>/dev/null || true
+  sleep 0.3
+  socat "TCP-LISTEN:18789,bind=${_AINETGW},reuseaddr,fork" "TCP:127.0.0.1:18789" &
+  say "Socat relay PID $!: ${_AINETGW}:18789 → 127.0.0.1:18789"
+else
+  say "WARNING: ai-net gateway not found; socat relay skipped (openclaw.lab.lan may return 502)"
+fi
+
 say "Director Ready. Running nemoclaw director connect --probe-only to wire up 18789 forward..."
 exec $NEMOCLAW director connect --probe-only

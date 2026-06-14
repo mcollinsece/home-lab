@@ -54,7 +54,7 @@ one line in `litellm/config.yaml`.
 | OpenShell gateway — Docker driver, deny-by-default sandboxes | ✅ live |
 | Claude Code sandbox — Max/Pro subscription | ✅ live |
 | Per-project subscription ↔ Bedrock dual-auth | ✅ live (Phase 3) |
-| **NemoClaw director** (OpenClaw in its own OpenShell sandbox) | ⬜ Bad Gateway on openclaw.lab.lan (director provisioning in progress; run `nemoclaw director status` + `rebuild --yes`; see todos) |
+| **NemoClaw director** (OpenClaw in its own OpenShell sandbox) | ✅ live — `openclaw.lab.lan` returns 200; no auth token; `litellm/claude-sonnet-4-6` (Bedrock) backend; all patches persistent via probe service |
 | Claude Code sandbox (lab gateway) | ✅ Ready (recreated post-nemoclaw with `/usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure` + inference.local) |
 | Codex CLI sandbox | ⬜ roadmap (Phase 5) |
 | Gemini CLI sandbox | ⬜ roadmap (Phase 6) |
