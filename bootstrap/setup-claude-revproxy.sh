@@ -30,18 +30,25 @@ else
   say "ai-net: connected."
 fi
 
-# ── 3. Install wrapper deps if missing ────────────────────────────────────────
+# ── 3. Copy wrapper code to sandbox ───────────────────────────────────────────
 _UV_BIN="/sandbox/.uv/python/cpython-3.14.3-linux-x86_64-gnu/bin"
+_WRAPPER_DIR="/sandbox/wrapper"
+
+say "Copying wrapper code to sandbox..."
+docker exec "$_SB" mkdir -p "$_WRAPPER_DIR"
+docker cp "$(dirname "$0")/../wrappers/claude-code-openai-wrapper/src" "$_SB:$_WRAPPER_DIR/"
+docker cp "$(dirname "$0")/../wrappers/claude-code-openai-wrapper/requirements.txt" "$_SB:$_WRAPPER_DIR/"
+
+# ── 4. Install wrapper deps if missing ────────────────────────────────────────
 if ! docker exec "$_SB" "$_UV_BIN/python3" -c "import fastapi, uvicorn, claude_agent_sdk" 2>/dev/null; then
   say "Installing wrapper Python dependencies..."
   docker exec "$_SB" "$_UV_BIN/python3" -m pip install --quiet --break-system-packages \
-    fastapi "uvicorn[standard]" pydantic python-dotenv httpx \
-    sse-starlette python-multipart claude-agent-sdk slowapi
+    -r "$_WRAPPER_DIR/requirements.txt"
 else
   say "Wrapper deps: already installed."
 fi
 
-# ── 4. Start wrapper ───────────────────────────────────────────────────────────
+# ── 5. Start wrapper ───────────────────────────────────────────────────────────
 say "Starting claude-code-openai-wrapper (OAuth / Pro subscription)..."
 docker exec "$_SB" pkill -f uvicorn 2>/dev/null || true
 sleep 2
