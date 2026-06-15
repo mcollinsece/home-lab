@@ -59,18 +59,14 @@ model_list:
   #     api_base: http://host.docker.internal:11434/v1
   #     api_key: none
 
-  # --- claude-code agent via wrapper (added for claude-code-revproxy) ---
-  # Additional OpenShell sandbox with claude-code-openai-wrapper running persistently.
-  # - Inbound: LiteLLM reverse-proxies here so NemoClaw/OpenClaw director sees
-  #   the full claude-code agent (tools enabled via extra_body) as just another model.
-  # - Outbound (agent brain): uses Bedrock directly inside the sandbox (via --bedrock
-  #   injection + existing claude-code.yaml policy). Future: can route via inference.local
-  #   once wrapper supports ANTHROPIC_BASE_URL (see repo issue #37).
-  # After `osbox claude-code-agent --bedrock --wrapper --headless`:
-  #   1. docker ps | grep claude-code-agent   (note the full container name, e.g. openshell-claude-code-agent-xxx)
-  #   2. Replace the placeholder below with that name (or its IP on ai-net).
-  #   3. docker compose -f docker/compose.yml restart litellm
-  # The internal key must match the one set by osbox --wrapper.
+  # --- claude-code agent via wrapper ---
+  # Runs inside openshell-claude-revproxy sandbox (OpenShell isolation).
+  # - Inbound: LiteLLM reverse-proxies here; OpenClaw sees the full Claude Code agent as a model.
+  # - Outbound: wrapper uses claude_agent_sdk (bundled claude CLI) with OAuth / Pro subscription.
+  #   No Bedrock credentials in the sandbox — auth is purely claude.ai OAuth.
+  # Sandbox is connected to ai-net with alias "claude-code-wrapper".
+  # Restart wrapper after reboot: see bootstrap/setup-claude-revproxy.sh
+  # Credentials sync: bootstrap/sync-claude-credentials.sh (copy host ~/.claude to sandbox /root/.claude)
   - model_name: claude-code-sonnet
     litellm_params:
       model: openai/claude-sonnet-4-6
@@ -81,8 +77,17 @@ model_list:
       max_input_tokens: 128000
       max_output_tokens: 64000
 
-  # Alias (optional)
   - model_name: claude-code/sonnet
+    litellm_params:
+      model: openai/claude-sonnet-4-6
+      api_base: http://claude-code-wrapper:8000/v1
+      api_key: claude-code-internal-revproxy-key-2026
+    model_info:
+      max_tokens: 64000
+      max_input_tokens: 128000
+      max_output_tokens: 64000
+
+  - model_name: claude-code-wrapper-local
     litellm_params:
       model: openai/claude-sonnet-4-6
       api_base: http://claude-code-wrapper:8000/v1

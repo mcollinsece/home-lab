@@ -3,15 +3,19 @@
 # bootstrap/nemoclaw-director-probe.sh
 #
 # Wrapper invoked by the systemd --user service nemoclaw-director-control-ui.service.
-# Waits for the director sandbox to reach "Ready" phase, then runs
-# `nemoclaw director connect --probe-only` (non-interactively) to establish
-# the port forward for the Control UI on 18789 (so openclaw.lab.lan works).
+# Waits for the director sandbox to reach "Ready" phase, then:
+#   1. Applies persistent openclaw.json patches (CORS, litellm-only provider)
+#   2. Writes a pass-through openclaw shim (config drives auth/bind)
+#   3. Connects the director Docker container to ai-net (alias: openclaw-director)
+#      so Traefik can reach it directly — no SSH tunnel or socat needed
+#   4. Starts openclaw gateway as the sandbox user inside the director container
+#      (NODE_TLS_REJECT_UNAUTHORIZED=0 required: OpenShell proxy presents a self-signed
+#       "OpenShell Sandbox CA" cert for inference.local that Node.js rejects by default)
 #
-# This must be re-run after every reboot and after every `nemoclaw director rebuild`
-# (the recreate script will restart the service for you).
+# Traefik static route (traefik/dynamic/openclaw-nemoclaw.yml) points to
+# http://openclaw-director:18789 — stable across director rebuilds.
 #
-# The service is oneshot + RemainAfterExit, so "active (exited)" after success
-# and will be restarted on failure or explicit restart.
+# Re-run this service after: nemoclaw director rebuild, reboot, or openclaw crash.
 
 set -euo pipefail
 
@@ -39,28 +43,22 @@ if ! $NEMOCLAW director status 2>/dev/null | grep -q "Phase:.*Ready"; then
   exit 1
 fi
 
-# ── Persistent openclaw patches (CORS + auth) ────────────────────────────────
-# These run on every probe invocation (boot + rebuild) so they survive
-# nemoclaw director rebuild (which starts a fresh container from the image).
-#
-# 1. CORS: add https://openclaw.lab.lan to gateway.controlUi.allowedOrigins
-#    and recompute .config-hash so the startup integrity check passes.
-# 2. Auth wrapper: replace /usr/local/bin/openclaw with a shim that adds
-#    --auth none to every "gateway run" invocation, so the Control UI at
-#    openclaw.lab.lan never requires a token (safe on a local home network).
-#
-# After either change, openclaw must be killed; connect --probe-only (below)
-# restarts it via SSH with the patched config and wrapper in place.
-# openshell-sandbox (PID 1) does NOT auto-restart openclaw on its own.
-
+# ── Find director Docker container ─────────────────────────────────────────────
 _DIRECTOR_CONTAINER=$(docker ps --filter 'name=openshell-director-' --format '{{.Names}}' | head -1)
-_NEED_RESTART=false
+if [[ -z "$_DIRECTOR_CONTAINER" ]]; then
+  echo "ERROR: director Docker container not found (docker ps)."
+  exit 1
+fi
+say "Director container: $_DIRECTOR_CONTAINER"
 
-if [[ -n "$_DIRECTOR_CONTAINER" ]]; then
+# ── Persistent openclaw patches (CORS) ──────────────────────────────────────────
+# Patch /sandbox/.openclaw/openclaw.json (sandbox user's home is /sandbox).
+# The probe uses docker exec -u root to write the files, then fixes ownership.
+# The hash file is updated after each write so openclaw's startup integrity check passes.
 
-  # ── 1. CORS patch ───────────────────────────────────────────────────────────
-  say "Patching openclaw.json allowedOrigins for openclaw.lab.lan (CORS fix)..."
-  _PATCH_RESULT=$(docker exec -i -u root "$_DIRECTOR_CONTAINER" python3 - << 'PY'
+# ── 1. CORS patch ───────────────────────────────────────────────────────────────
+say "Patching openclaw.json allowedOrigins for openclaw.lab.lan (CORS fix)..."
+_PATCH_RESULT=$(docker exec -i -u root "$_DIRECTOR_CONTAINER" python3 - << 'PY'
 import json, subprocess, sys
 cfg = "/sandbox/.openclaw/openclaw.json"
 hf  = "/sandbox/.openclaw/.config-hash"
@@ -94,15 +92,12 @@ except Exception as e:
     print("error: " + str(e), file=sys.stderr)
     sys.exit(1)
 PY
-  2>&1) || true
-  say "CORS patch: ${_PATCH_RESULT}"
-  if echo "$_PATCH_RESULT" | grep -q "^patched:"; then
-    _NEED_RESTART=true
-  fi
+2>&1) || true
+say "CORS patch: ${_PATCH_RESULT}"
 
-  # ── 2. Provider rename: inference → litellm ─────────────────────────────────
-  say "Renaming inference provider to litellm in openclaw.json..."
-  _RENAME_RESULT=$(docker exec -i -u root "$_DIRECTOR_CONTAINER" python3 - << 'PY'
+# ── 2. Provider rename: inference → litellm ─────────────────────────────────────
+say "Renaming inference provider to litellm in openclaw.json..."
+_RENAME_RESULT=$(docker exec -i -u root "$_DIRECTOR_CONTAINER" python3 - << 'PY'
 import json, subprocess, sys
 cfg = "/sandbox/.openclaw/openclaw.json"
 hf  = "/sandbox/.openclaw/.config-hash"
@@ -141,17 +136,49 @@ except Exception as e:
     print("error: " + str(e), file=sys.stderr)
     sys.exit(1)
 PY
-  2>&1) || true
-  say "Provider rename: ${_RENAME_RESULT}"
-  if echo "$_RENAME_RESULT" | grep -q "^patched:"; then
-    _NEED_RESTART=true
-  fi
+2>&1) || true
+say "Provider rename: ${_RENAME_RESULT}"
 
-  # ── 3b. Ensure litellm model is explicit in agents.defaults (for session picker)
-  # We are stripping out anthropic / claude-cli / claude-agent providers for now.
-  # Only keeping the working litellm (OpenAI-compatible via LiteLLM) path.
-  say "Ensuring litellm model entry is explicit for session picker (no anthropic/claude-agent)..."
-  _CLICFG_RESULT=$(docker exec -i -u root "$_DIRECTOR_CONTAINER" python3 - << 'PY'
+# ── 3a. Ensure claude-code-wrapper-local model is in providers.litellm.models ──────
+say "Ensuring claude-code-wrapper-local model entry in openclaw.json litellm provider..."
+docker exec -i -u root "$_DIRECTOR_CONTAINER" python3 - << 'PY'
+import json, subprocess, sys
+cfg = "/sandbox/.openclaw/openclaw.json"
+hf  = "/sandbox/.openclaw/.config-hash"
+try:
+    with open(cfg) as f:
+        data = json.load(f)
+    provider_models = data.setdefault("models", {}).setdefault("providers", {}).setdefault("litellm", {}).setdefault("models", [])
+    new_id = "claude-code-wrapper-local"
+    if any(m.get("id") == new_id for m in provider_models):
+        print("already-ok")
+        sys.exit(0)
+    provider_models.append({
+        "compat": {"supportsStore": False},
+        "id": new_id,
+        "name": "litellm/claude-code-wrapper-local",
+        "reasoning": False,
+        "input": ["text"],
+        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+        "contextWindow": 131072,
+        "maxTokens": 64000
+    })
+    with open(cfg, "w") as f:
+        json.dump(data, f, indent=2)
+    r = subprocess.run(["sh", "-c", "cd /sandbox/.openclaw && sha256sum openclaw.json"],
+                       capture_output=True, text=True)
+    with open(hf, "w") as f:
+        f.write(r.stdout)
+    subprocess.run(["chown", "sandbox:sandbox", hf])
+    subprocess.run(["chmod", "660", hf])
+    print("added claude-code-wrapper-local to litellm provider models")
+except Exception as e:
+    print("error: " + str(e), file=sys.stderr)
+PY
+
+# ── 3. Litellm-only model config ────────────────────────────────────────────────
+say "Ensuring litellm model entry is explicit for session picker (no anthropic/claude-agent)..."
+_CLICFG_RESULT=$(docker exec -i -u root "$_DIRECTOR_CONTAINER" python3 - << 'PY'
 import json, subprocess, sys
 cfg = "/sandbox/.openclaw/openclaw.json"
 hf  = "/sandbox/.openclaw/.config-hash"
@@ -160,18 +187,17 @@ try:
         data = json.load(f)
     defaults = data.setdefault("agents", {}).setdefault("defaults", {})
     models_cfg = defaults.setdefault("models", {})
-    # Only ensure litellm is explicitly listed (no claude-cli runtimes, no anthropic, no claude-agent)
     added = []
-    if "litellm/claude-sonnet-4-6" not in models_cfg:
-        models_cfg["litellm/claude-sonnet-4-6"] = {}
-        added.append("litellm/claude-sonnet-4-6")
-    # Clean up any old anthropic or claude-agent entries if present (user wants only litellm)
+    for mname in ["litellm/claude-sonnet-4-6", "litellm/claude-code-wrapper-local"]:
+        if mname not in models_cfg:
+            models_cfg[mname] = {}
+            added.append(mname)
+    # Remove any old anthropic or claude-agent entries
     for key in list(models_cfg.keys()):
         if key.startswith("anthropic/") or key.startswith("claude-agent/"):
             del models_cfg[key]
             added.append("removed:" + key)
     providers = data.setdefault("models", {}).setdefault("providers", {})
-    # Remove anthropic and claude-agent providers if present
     for bad in ["anthropic", "claude-agent"]:
         if bad in providers:
             del providers[bad]
@@ -194,84 +220,75 @@ except Exception as e:
     print("error: " + str(e), file=sys.stderr)
     sys.exit(1)
 PY
-  2>&1) || true
-  say "litellm-only model config: ${_CLICFG_RESULT}"
-  if echo "$_CLICFG_RESULT" | grep -q "^patched:"; then
-    _NEED_RESTART=true
-  fi
+2>&1) || true
+say "litellm-only model config: ${_CLICFG_RESULT}"
 
-  # (claude / anthropic / claude-agent sync + wrapper removed per user request.
-  #   We are running with JUST the litellm provider for now.)
-  #   The claude binary/credentials sync and the routing wrapper have been ripped out.
-
-  # ── 4. Auth wrapper ─────────────────────────────────────────────────────────
-  # Inject --auth none into every "openclaw gateway run" call so the Control UI
-  # never demands a token. We write a minimal Node.js ESM shim directly into
-  # /usr/local/lib/node_modules/openclaw/openclaw.mjs (the npm package entry
-  # that /usr/local/bin/openclaw is symlinked to). The shim patches process.argv
-  # and then imports ./dist/entry.js — no bash wrapper, no extension issues.
-  #
-  # Detection: presence of "inject --auth none" in openclaw.mjs.
-  # After nemoclaw director rebuild the container starts from a fresh image,
-  # restoring the original openclaw.mjs; the probe re-applies the shim.
-  _OC_MJS=/usr/local/lib/node_modules/openclaw/openclaw.mjs
-  if ! docker exec -u root "$_DIRECTOR_CONTAINER" \
-       grep -q "inject --auth none --bind loopback" "$_OC_MJS" 2>/dev/null; then
-    say "Writing openclaw --auth none shim (disables Control UI token prompt)..."
-    docker exec -i -u root "$_DIRECTOR_CONTAINER" bash << 'DOCKERWRAP'
-set -e
-MPATH=/usr/local/lib/node_modules/openclaw/openclaw.mjs
-cat > "$MPATH" << 'NODEEOF'
-#!/usr/bin/env node
-// Shim: inject --auth none --bind loopback into "openclaw gateway run" (no token required on local home network)
-// --bind loopback is required because openclaw refuses bind=auto (0.0.0.0) when auth=none
-const args = process.argv.slice(2);
-if (args.length >= 2 && args[0] === "gateway" && args[1] === "run"
-    && !args.includes("--auth") && !args.includes("--bind")) {
-  process.argv = [...process.argv.slice(0, 2), "gateway", "run",
-    "--auth", "none", "--bind", "loopback", ...args.slice(2)];
-}
+# ── 4. Pass-through openclaw shim ───────────────────────────────────────────────
+# The shim at /usr/local/lib/node_modules/openclaw/openclaw.mjs just passes through
+# to dist/entry.js without forcing --auth none or --bind loopback.
+# Config drives auth (token + dangerouslyDisableDeviceAuth) and bind (auto = 0.0.0.0 in container).
+_OC_MJS=/usr/local/lib/node_modules/openclaw/openclaw.mjs
+if ! docker exec -u root "$_DIRECTOR_CONTAINER" \
+     grep -q "pass-through" "$_OC_MJS" 2>/dev/null; then
+  say "Writing pass-through openclaw shim..."
+  docker exec -i -u root "$_DIRECTOR_CONTAINER" python3 - << 'PY'
+content = '''#!/usr/bin/env node
+// Shim: pass-through — config drives auth (token + dangerouslyDisableDeviceAuth) and bind (auto=0.0.0.0 in container)
 await import("./dist/entry.js");
-NODEEOF
-chmod 755 "$MPATH"
-# Ensure /usr/local/bin/openclaw is the correct symlink (rebuild may restore a regular file)
-if [ ! -L /usr/local/bin/openclaw ]; then
-  rm -f /usr/local/bin/openclaw
-  ln -s "$MPATH" /usr/local/bin/openclaw
-fi
-echo "shim written"
-DOCKERWRAP
-    _NEED_RESTART=true
-    say "Auth shim installed."
-  else
-    say "Auth shim: already installed."
-  fi
-
-  # ── Restart if anything changed ─────────────────────────────────────────────
-  if [[ "$_NEED_RESTART" == true ]]; then
-    say "Killing openclaw so connect --probe-only restarts it with all patches applied..."
-    docker exec "$_DIRECTOR_CONTAINER" pkill -x openclaw 2>/dev/null || true
-    sleep 3
-  fi
-
-fi
-
-# ── Bridge relay: Traefik container → SSH tunnel ────────────────────────────
-# nemoclaw director connect --probe-only binds the SSH tunnel on 127.0.0.1:18789
-# (host loopback only). Traefik runs inside a Docker container and cannot reach
-# the host's 127.0.0.1. socat listens on the Docker bridge gateway IP
-# (172.18.0.1 for ai-net) and relays to the SSH tunnel — matching the static
-# route in traefik/dynamic/openclaw-nemoclaw.yml.
-say "Starting socat bridge relay (Traefik container → SSH tunnel)..."
-_AINETGW=$(docker network inspect ai-net --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null | head -1 | tr -d ' ')
-if [[ -n "$_AINETGW" ]]; then
-  pkill -f "socat TCP-LISTEN:18789,bind=${_AINETGW}" 2>/dev/null || true
-  sleep 0.3
-  socat "TCP-LISTEN:18789,bind=${_AINETGW},reuseaddr,fork" "TCP:127.0.0.1:18789" &
-  say "Socat relay PID $!: ${_AINETGW}:18789 → 127.0.0.1:18789"
+'''
+with open('/usr/local/lib/node_modules/openclaw/openclaw.mjs', 'w') as f:
+    f.write(content)
+import os, subprocess
+os.chmod('/usr/local/lib/node_modules/openclaw/openclaw.mjs', 0o755)
+# Ensure /usr/local/bin/openclaw is a symlink to openclaw.mjs
+r = subprocess.run(['test', '-L', '/usr/local/bin/openclaw'], capture_output=True)
+if r.returncode != 0:
+    subprocess.run(['rm', '-f', '/usr/local/bin/openclaw'])
+    subprocess.run(['ln', '-s', '/usr/local/lib/node_modules/openclaw/openclaw.mjs', '/usr/local/bin/openclaw'])
+print('shim written')
+PY
 else
-  say "WARNING: ai-net gateway not found; socat relay skipped (openclaw.lab.lan may return 502)"
+  say "Pass-through shim: already installed."
 fi
 
-say "Director Ready. Running nemoclaw director connect --probe-only to wire up 18789 forward..."
-exec $NEMOCLAW director connect --probe-only
+# ── 5. Connect director to ai-net (alias: openclaw-director) ────────────────────
+# Traefik routes http://openclaw-director:18789 → director container (stable alias).
+# No SSH tunnel or socat needed.
+say "Connecting director to ai-net (alias: openclaw-director)..."
+if docker network inspect ai-net --format '{{range .Containers}}{{.Name}} {{end}}' | grep -q "$_DIRECTOR_CONTAINER"; then
+  say "ai-net: already connected."
+else
+  docker network disconnect ai-net "$_DIRECTOR_CONTAINER" 2>/dev/null || true
+  docker network connect --alias openclaw-director ai-net "$_DIRECTOR_CONTAINER"
+  say "ai-net: connected (alias openclaw-director)."
+fi
+
+# ── 6. Kill any stale SSH tunnel or socat (legacy from Tailscale era) ───────────
+pkill -f 'socat TCP-LISTEN:18789' 2>/dev/null || true
+pkill -f 'openshell ssh-proxy.*18789\|ssh.*18789.*sandbox' 2>/dev/null || true
+
+# ── 7. Start openclaw gateway inside the director container ─────────────────────
+# Run as sandbox user with HOME=/sandbox so it reads /sandbox/.openclaw/openclaw.json.
+# Config uses token auth + dangerouslyDisableDeviceAuth (no prompt needed for UI).
+# Container environment makes openclaw default to bind=auto (0.0.0.0).
+say "Starting openclaw gateway inside director (as sandbox, HOME=/sandbox)..."
+# Kill any existing openclaw process in the director
+docker exec -u root "$_DIRECTOR_CONTAINER" pkill -x openclaw 2>/dev/null || true
+sleep 2
+docker exec -d -e HOME=/sandbox -e NODE_TLS_REJECT_UNAUTHORIZED=0 -u sandbox "$_DIRECTOR_CONTAINER" openclaw gateway run --port 18789
+
+say "Waiting for openclaw gateway to be ready on port 18789..."
+for i in {1..30}; do
+  if docker exec -u root "$_DIRECTOR_CONTAINER" ss -tlnp 2>/dev/null | grep -q ':18789'; then
+    say "openclaw gateway is listening on :18789 inside director."
+    break
+  fi
+  sleep 1
+done
+
+if ! docker exec -u root "$_DIRECTOR_CONTAINER" ss -tlnp 2>/dev/null | grep -q ':18789'; then
+  echo "WARNING: openclaw gateway did not start within 30s. Check logs in director."
+fi
+
+say "Probe complete. openclaw.lab.lan → Traefik → openclaw-director:18789"
+say "  (no SSH tunnel or socat; director is on ai-net with alias openclaw-director)"

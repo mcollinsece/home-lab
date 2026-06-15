@@ -10,35 +10,42 @@
 All pay-per-token inference routes through one OpenAI-compatible endpoint.
 Backend changes happen in one config file. CLI tools inside agent sandboxes never
 hold real credentials — they talk to `inference.local`, which the OpenShell gateway
-routes to LiteLLM.
+routes to LiteLLM. The Claude Code agent wrapper surfaces as just another model name
+behind LiteLLM; callers never know they are hitting a full agentic runtime.
 
 ---
 
 ## Architecture
 
 ```
-NemoClaw OpenClaw sandbox ────────────────────────► LiteLLM (:4000)
-                                                          │
-OpenShell gateway                                         │
-  inference.local ──────────────────────────────────────►│
-       ▲                                                  │
-       │  all sandboxes point here                        ▼
-  ┌────┴──────────────────────────────────┐        AWS Bedrock
-  │  claude-code sandbox                   │        (primary today)
-  │    ANTHROPIC_BASE_URL=inference.local  │
-  │  gemini sandbox (Phase 6)              │        ── future ──
-  │    GEMINI_BASE_URL=inference.local     │        OpenAI API
-  │  codex sandbox (Phase 5)              │        Google Vertex
-  │    OPENAI_BASE_URL=inference.local/v1  │        xAI / Grok
-  └───────────────────────────────────────┘        Ollama (local)
+NemoClaw OpenClaw director ──────────────────────► LiteLLM (:4000)
+                                                         │
+OpenShell gateway                                        │
+  inference.local ─────────────────────────────────────►│
+       ▲                                                 │
+       │  all sandboxes point here                       ├─── Bedrock (claude-sonnet-4-6)
+  ┌────┴─────────────────────────────────────┐          │    AWS SigV4, cross-region profile
+  │  claude-code sandbox                      │          │
+  │    ANTHROPIC_BASE_URL=https://inference.  │          └─── claude-code-wrapper:8000
+  │  codex sandbox (Phase 5)                 │               openshell-claude-revproxy sandbox
+  │  gemini sandbox (Phase 6)                │               claude-code-openai-wrapper (uvicorn)
+  └────────────────────────────────────────┬─┘               OAuth/Pro → api.anthropic.com
+                                           │                   ▲
+                                           └───────────────────┘
+                                           (sandbox is also on ai-net, alias: claude-code-wrapper)
 ```
 
-**Key property**: the CLI tools (Claude Code, Codex, Gemini) are the agentic runtime.
-They do not provide the model. Their own OAuth sessions are irrelevant when
-`inference.local` is the endpoint. Swapping backends is a single `litellm/config.yaml`
-change — no sandbox is touched.
+**Two auth paths, one credential boundary:**
 
-**Post-NemoClaw / dual-gateway note**: NemoClaw's director (OpenClaw sandbox) is configured directly against the LiteLLM OpenAI-compatible endpoint during `nemoclaw onboard`. Lab sandboxes (claude-code) continue to use the OpenShell gateway's `inference.local` (routed to the same LiteLLM). Both ultimately hit the single credential boundary here. Director is currently the active troubleshooting target (Bad Gateway on openclaw.lab.lan — see todos.md).
+| Route | Auth method | Credential holder |
+|---|---|---|
+| `claude-sonnet-4-6` → Bedrock | AWS SigV4 | LiteLLM container only |
+| `claude-code-wrapper-local` → wrapper | OAuth/Pro subscription | sandbox `/root/.claude/` (synced from host) |
+
+The CLI tools inside inference.local sandboxes (claude-code, codex, gemini) never hold
+credentials — they point at `inference.local` and LiteLLM fills in the backend.
+OpenClaw / any other LiteLLM client sees both Bedrock models and the claude-code agent
+as interchangeable model names.
 
 ---
 
@@ -46,9 +53,10 @@ change — no sandbox is touched.
 
 | Component | What it does |
 |---|---|
-| **LiteLLM** (Docker Compose service) | OpenAI-compatible proxy; sole holder of Bedrock creds; routes to Bedrock today, extensible to any provider |
+| **LiteLLM** (Docker Compose service) | OpenAI-compatible proxy; sole holder of Bedrock creds; routes Bedrock models and reverse-proxies the claude-code wrapper |
 | **OpenShell provider `litellm-local`** | Routes `inference.local` from the gateway to LiteLLM at `http://localhost:4000/v1` |
-| **NemoClaw OpenClaw** | Configured with LiteLLM as the OpenAI-compatible provider during `nemoclaw onboard` |
+| **NemoClaw OpenClaw** | Configured with LiteLLM as the OpenAI-compatible provider; models: `litellm/claude-sonnet-4-6` and `litellm/claude-code-wrapper-local` |
+| **claude-revproxy sandbox** | OpenShell sandbox running `claude-code-openai-wrapper`; connected to ai-net as `claude-code-wrapper`; outbound via OAuth |
 
 ---
 
@@ -69,8 +77,12 @@ litellm/
 
 ## config.yaml
 
+The full file is at `litellm/config.yaml`. Key model entries:
+
 ```yaml
 model_list:
+
+  # Bedrock: Claude Sonnet 4.6
   - model_name: claude-sonnet-4-6
     litellm_params:
       model: bedrock/us.anthropic.claude-sonnet-4-6
@@ -78,10 +90,32 @@ model_list:
       aws_secret_access_key: os.environ/AWS_SECRET_ACCESS_KEY
       aws_region_name: os.environ/AWS_REGION
       max_tokens: 64000
-    model_info:
-      max_tokens: 64000
-      max_input_tokens: 128000
-      max_output_tokens: 64000
+
+  # Bedrock alias (full ARN form)
+  - model_name: bedrock/us.anthropic.claude-sonnet-4-6
+    litellm_params:
+      model: bedrock/us.anthropic.claude-sonnet-4-6
+      # ... same Bedrock params
+
+  # claude-code agent via wrapper (three aliases for the same sandbox endpoint)
+  # Auth: CLAUDE_CODE_AUTH_METHOD=cli (OAuth/Pro subscription, no AWS keys)
+  - model_name: claude-code-wrapper-local
+    litellm_params:
+      model: openai/claude-sonnet-4-6
+      api_base: http://claude-code-wrapper:8000/v1
+      api_key: claude-code-internal-revproxy-key-2026
+
+  - model_name: claude-code-sonnet
+    litellm_params:
+      model: openai/claude-sonnet-4-6
+      api_base: http://claude-code-wrapper:8000/v1
+      api_key: claude-code-internal-revproxy-key-2026
+
+  - model_name: claude-code/sonnet
+    litellm_params:
+      model: openai/claude-sonnet-4-6
+      api_base: http://claude-code-wrapper:8000/v1
+      api_key: claude-code-internal-revproxy-key-2026
 
 litellm_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
@@ -90,12 +124,12 @@ general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
 ```
 
-`max_tokens: 64000` cap prevents NemoClaw's OpenClaw from requesting 200K tokens,
-which Bedrock rejects (128K limit on cross-region inference profiles).
+`max_tokens: 64000` cap prevents OpenClaw from requesting 200K tokens, which Bedrock
+rejects (128K limit on cross-region inference profiles).
 
-Bedrock model ID: `us.anthropic.claude-sonnet-4-6` (no date suffix — Claude 4.x
-dropped the date from the cross-region inference profile name). Verified via Bedrock
-SigV4 API. See comment in the actual `litellm/config.yaml` for the verification command.
+Bedrock model ID: `us.anthropic.claude-sonnet-4-6` (no date suffix — Claude 4.x dropped
+the date from the cross-region inference profile name). See the comment in
+`litellm/config.yaml` for the Bedrock API verification command.
 
 ---
 
@@ -109,6 +143,10 @@ Populated by `init-secrets`. Injected into the Docker Compose `litellm` service 
 | `AWS_ACCESS_KEY_ID` | IAM console | LiteLLM → Bedrock (sole credential holder) |
 | `AWS_SECRET_ACCESS_KEY` | IAM console | LiteLLM → Bedrock |
 | `AWS_REGION` | e.g. `us-east-1` | LiteLLM → Bedrock |
+
+The claude-code wrapper uses OAuth (no AWS keys). Its credentials live at
+`~/.claude/.credentials.json` on the host and are synced to the sandbox via
+`bootstrap/sync-claude-credentials.sh`.
 
 ---
 
@@ -143,8 +181,9 @@ Base URL: http://localhost:4000/v1
 Model:    claude-sonnet-4-6
 ```
 
-NemoClaw's OpenClaw sandbox will route all inference through LiteLLM, which routes
-to Bedrock. The sandbox itself holds no AWS credentials.
+NemoClaw's OpenClaw sandbox routes all inference through LiteLLM. The probe service
+(`nemoclaw-director-control-ui`) subsequently patches the director's `openclaw.json`
+to rename the provider to `litellm` and add `claude-code-wrapper-local` to the model list.
 
 ---
 
@@ -153,12 +192,17 @@ to Bedrock. The sandbox itself holds no AWS credentials.
 Sandboxes need no credential injection. `inference.local` is the uniform endpoint:
 
 ```bash
-# Claude Code sandbox
+# Claude Code sandbox (interactive use via inference.local → Bedrock)
 openshell sandbox create --name claude-code --no-auto-providers \
     --policy openshell/policies/claude-code.yaml \
     --env ANTHROPIC_BASE_URL=https://inference.local \
     --env ANTHROPIC_API_KEY=unused \
     -- claude
+
+# claude-code wrapper sandbox (persistent, serves as model endpoint)
+# After create, run: bootstrap/setup-claude-revproxy.sh
+openshell sandbox create --name claude-revproxy --no-auto-providers \
+    --policy openshell/policies/claude-code.yaml
 
 # Codex sandbox (Phase 5)
 openshell sandbox create --name codex --no-auto-providers \
@@ -182,15 +226,22 @@ openshell sandbox create --name gemini --no-auto-providers \
 ```bash
 LITELLM_KEY=$(grep LITELLM_MASTER_KEY ~/home-lab/.secrets/litellm.env | cut -d= -f2)
 
-# Model list
+# Model list (should show claude-sonnet-4-6, claude-code-wrapper-local, aliases)
 curl -s http://localhost:4000/v1/models \
   -H "Authorization: Bearer ${LITELLM_KEY}" | python3 -m json.tool
 
-# End-to-end inference
+# Bedrock inference
 curl -s http://localhost:4000/v1/chat/completions \
   -H "Authorization: Bearer ${LITELLM_KEY}" \
   -H "Content-Type: application/json" \
   -d '{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"say hi"}]}' \
+  | python3 -m json.tool
+
+# Claude Code wrapper inference (requires claude-revproxy sandbox running)
+curl -s http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer ${LITELLM_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude-code-wrapper-local","messages":[{"role":"user","content":"what is 2+2?"}]}' \
   | python3 -m json.tool
 ```
 
@@ -208,6 +259,16 @@ docker compose -f ~/home-lab/docker/compose.yml logs -f litellm
 # View model list
 docker compose -f ~/home-lab/docker/compose.yml exec litellm \
   curl -s http://localhost:4000/v1/models
+
+# Start / restart the claude-code wrapper (after reboot or sandbox rebuild)
+bootstrap/setup-claude-revproxy.sh
+
+# Sync OAuth credentials to the wrapper sandbox (after claude auth login on host)
+bootstrap/sync-claude-credentials.sh
+
+# Check wrapper is listening
+_SB=$(docker ps --filter 'name=openshell-claude-revproxy-' --format '{{.Names}}' | head -1)
+docker exec "$_SB" ss -tlnp | grep ':8000'
 ```
 
 ---
@@ -220,3 +281,4 @@ docker compose -f ~/home-lab/docker/compose.yml exec litellm \
 | **LiteLLM virtual keys / spend tracking** | Budget limits per sandbox. Needs SQLite/Postgres backend. Skip for now. |
 | **LiteLLM UI** | Ships at `/ui`; disabled by default. Enable if spend visibility wanted. |
 | **Per-sandbox inference override** | All sandboxes share one active backend. Per-sandbox overrides require separate gateway instances. |
+| **systemd timer for credentials sync** | Keep OAuth token in `openshell-claude-revproxy` sandbox fresh without manual `sync-claude-credentials.sh`. |

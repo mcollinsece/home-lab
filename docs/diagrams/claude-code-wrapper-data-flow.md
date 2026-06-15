@@ -1,78 +1,59 @@
-# Claude Code OpenAI Wrapper — Envisioned Data Flow
+# Claude Code OpenAI Wrapper — Data Flow
 
-This document captures the proposed architecture for exposing a full Claude Code agent (running inside an isolated OpenShell sandbox) as a first-class model behind the existing central LiteLLM proxy.
+**Status (2026-06-14): LIVE.** The wrapper is deployed and serving requests. This document
+details the data flow through `claude-code-openai-wrapper` running inside the
+`openshell-claude-revproxy` OpenShell sandbox.
 
-**Core goal**: Add powerful agentic "claude-code" behavior (tools, long sessions, file editing in a safe workspace) as just another model name under the `litellm` provider. Nothing changes in NemoClaw / OpenClaw configuration or the director probe. All credentials and routing stay unified at LiteLLM + Bedrock.
+**Auth path:** OAuth/Pro subscription (`CLAUDE_CODE_AUTH_METHOD=cli`) — not Bedrock.
+The wrapper sandbox holds no AWS credentials.
 
----
-
-## Generated Visual Diagram
-
-A detailed architecture diagram was generated for this flow:
-
-**Image path**: `/home/debian/.grok/sessions/%2Fhome%2Fdebian%2Fhome-lab/019ec751-4c45-77a0-96f0-acb62f1813a4/images/1.jpg`
-
-(The diagram shows clients → LiteLLM → revproxied wrapper in sandbox → claude_agent_sdk → direct Bedrock, with the policy boundary, credential notes, native claude comparison path, and key labels for ports, auth, and tool enablement.)
+For the high-level architecture (what was added vs. what is unchanged), see
+[claude-code-agent-sandbox-flow.md](claude-code-agent-sandbox-flow.md).
 
 ---
 
-## Mermaid Diagram (copy-paste ready)
+## Mermaid Diagram
 
 ```mermaid
 flowchart TB
-    subgraph Clients["Clients (unchanged for NemoClaw)"]
-        OC["OpenClaw / NemoClaw Agents<br/>or any OpenAI SDK client"]
-        EXT["External tools<br/>(Continue.dev, custom scripts)"]
+    subgraph Clients["Clients (via LiteLLM)"]
+        OC["OpenClaw / NemoClaw director\n(model: litellm/claude-code-wrapper-local)"]
+        EXT["Any OpenAI-compatible client\n(model: claude-code-sonnet, etc.)"]
     end
 
-    subgraph LiteLLM["LiteLLM (central, :4000)"]
+    subgraph LiteLLM["LiteLLM (Docker :4000, ai-net)"]
         direction TB
-        LLM_CFG["config.yaml<br/>model_name: claude-code-sonnet<br/>litellm_params: openai +<br/>api_base: http://wrapper-addr:8000/v1<br/>(+ bearer if wrapper protected)"]
-        LLM["LiteLLM router<br/>(logs, virtual keys, retries, usage)"]
+        LLM_CFG["config.yaml\nmodel_name: claude-code-wrapper-local\napi_base: http://claude-code-wrapper:8000/v1\napi_key: claude-code-internal-revproxy-key-2026"]
+        LLM["LiteLLM router\n(logging, retries, fallback)"]
     end
 
-    subgraph Gateway["OpenShell Gateway<br/>(inference.local + custom routes)"]
-        GW["Gateway + providers<br/>mTLS :17670 / plaintext routes<br/>(revproxy target for wrapper)"]
-    end
-
-    subgraph Sandbox["claude-code-wrapper Sandbox (headless)"]
+    subgraph Sandbox["openshell-claude-revproxy sandbox (OpenShell isolation)"]
         direction TB
-        WRAPPER["uvicorn src.main:app<br/>:8000 internal<br/>(OpenAI + Anthropic /messages compat)"]
-        SDK["claude_agent_sdk.query()<br/>(official v0.1.18)"]
-        AUTH["Auth: CLAUDE_CODE_USE_BEDROCK=1<br/>+ AWS_* env vars<br/>(injected at create)"]
-        CWD["CLAUDE_CWD=/sandbox<br/>(rw per policy)"]
-        TOOLS["Tools: disabled by default<br/>(fast, max_turns=1)<br/>enable_tools:true → full agent<br/>(Read/Write/Bash/Edit...)"]
+        WRAPPER["uvicorn src.main:app :8000\nclaude-code-openai-wrapper\n(OpenAI-compatible FastAPI)"]
+        SDK["claude_agent_sdk.query()\nbundled claude CLI subprocess\nfull agent: tools, edits, sessions"]
+        AUTH["CLAUDE_CODE_AUTH_METHOD=cli\n/root/.claude/.credentials.json\n(synced from host via sync-claude-credentials.sh)"]
+        CWD["CLAUDE_CWD=/tmp\n(safe workspace for agent file ops)"]
     end
 
-    subgraph Bedrock["AWS Bedrock (commercial)"]
-        BR["Bedrock cross-region<br/>us.anthropic.claude-sonnet-4-6 etc.<br/>(SigV4, real cost metadata)"]
+    subgraph Anthropic["Anthropic (cloud)"]
+        ANT["api.anthropic.com\nOAuth/Pro subscription\n(no AWS SigV4 — not Bedrock)"]
     end
 
-    %% Main data flow (wrapper path)
-    OC -->|"1. OpenAI /v1/chat/completions<br/>model=claude-code-sonnet<br/>(+ extra_body enable_tools?)"| LLM
+    %% Main data flow
+    OC -->|"1. POST /v1/chat/completions\nmodel=claude-code-wrapper-local"| LLM
     EXT -->|"same OpenAI format"| LLM
     LLM --> LLM_CFG
-    LLM -->|"2. Forwarded request<br/>(passthrough extra_body + session_id)"| GW
-    GW -->|"3. Stable revproxy route<br/>(docker bridge / gateway forward / traefik)"| WRAPPER
-    WRAPPER -->|"4. Translate + SDK call"| SDK
+    LLM -->|"2. Forwarded to sandbox\nBearer: claude-code-internal-revproxy-key-2026"| WRAPPER
+    WRAPPER -->|"3. claude_agent_sdk.query()"| SDK
     SDK --> AUTH
     SDK --> CWD
-    SDK --> TOOLS
-    SDK -->|"5. Direct Bedrock calls<br/>(L4 passthrough, SigV4 preserved)"| BR
-    BR -->|"6. Response + real usage/cost"| SDK
-    SDK -->|"7. OpenAI-shaped response<br/>(text + usage)"| WRAPPER
-    WRAPPER -->|"8. Return through revproxy"| LLM
-    LLM -->|"9. Final response to client<br/>(unified logging/billing)"| OC
+    SDK -->|"4. OAuth HTTP to api.anthropic.com\n(sandbox egress allowed by policy)"| ANT
+    ANT -->|"5. Response"| SDK
+    SDK -->|"6. OpenAI-shaped response"| WRAPPER
+    WRAPPER -->|"7. Response through LiteLLM"| LLM
+    LLM -->|"8. Final response"| OC
     LLM --> EXT
 
-    %% Contrast: native claude path (already scaffolded)
-    subgraph Native["(Optional) Native claude sandbox<br/>(for direct TUI / -p use)"]
-        CLAUDE["claude binary (TUI or -p)"]
-        CLAUDE -->|"ANTHROPIC_BASE_URL=https://inference.local<br/>ANTHROPIC_API_KEY=unused"| GW
-    end
-    GW -->|"inference.local → LiteLLM → Bedrock"| LLM
-
-    %% Boundaries
     classDef cred fill:#fef3c7,stroke:#d97706
     class AUTH,LLM_CFG cred
 
@@ -85,90 +66,73 @@ flowchart TB
 
 ---
 
-## Step-by-Step Data Flow (Wrapper Path)
+## Step-by-Step Data Flow
 
-1. **Client request** (no change for most users)
-   - OpenClaw agent, director, or any OpenAI-compatible client sends a normal `POST /v1/chat/completions` to LiteLLM (`http://localhost:4000` or the equivalent via the director).
-   - Uses a model name registered in `litellm/config.yaml`, e.g. `claude-code-sonnet` or `claude-code/sonnet-4-6`.
-   - Can include `extra_body: { "enable_tools": true, "session_id": "my-agent-session" }` for full agentic behavior + conversation continuity.
-   - Authentication: the usual `Authorization: Bearer ${LITELLM_MASTER_KEY}`.
+1. **Client request** — OpenClaw director (or any OpenAI client) sends
+   `POST /v1/chat/completions` with `model: claude-code-wrapper-local` (or either alias)
+   to LiteLLM at `http://localhost:4000` (or via the inference.local gateway).
+   Auth: `Authorization: Bearer ${LITELLM_MASTER_KEY}`.
 
-2. **LiteLLM routing**
-   - Matches the model name to a custom `openai` upstream.
-   - Forwards the entire request (headers, body, extra_body) to the wrapper's address (the critical "revproxy" link — see below).
-   - LiteLLM can still apply its own limits, logging, spend tracking, fallbacks, etc.
+2. **LiteLLM routing** — matches model name to the `openai` upstream entry in
+   `litellm/config.yaml`; forwards to `http://claude-code-wrapper:8000/v1`
+   (Docker ai-net DNS alias for the `openshell-claude-revproxy` sandbox container).
+   Adds `Authorization: Bearer claude-code-internal-revproxy-key-2026`.
 
-3. **Reach the wrapper inside the sandbox (the revproxy piece)**
-   - The wrapper runs persistently (`uvicorn ... --host 0.0.0.0 --port 8000`) inside a long-lived OpenShell sandbox (created e.g. via `osbox claude-code-wrapper --bedrock --headless` or equivalent `openshell sandbox create`).
-   - Stable addressing options (work for the branch):
-     - OpenShell gateway custom provider / route that forwards a known name (e.g. `claude-code.lab.lan` or `inference.local/claude-wrapper`) to the sandbox container's internal port.
-     - Docker network reachability on the `ai-net` / `openshell-docker` bridge (sandbox container name or alias known to the LiteLLM container).
-     - Sidecar forwarder (socat / nginx) or Traefik dynamic config that targets the sandbox.
-   - If the wrapper has client protection enabled, LiteLLM supplies the static `API_KEY` as the bearer.
+3. **Wrapper receives** — `claude-code-openai-wrapper` (uvicorn FastAPI) accepts
+   the request. `RATE_LIMIT_ENABLED=false` — no throttle for internal LiteLLM caller.
+   The wrapper translates from OpenAI chat format to the SDK's message format.
 
-4. **Wrapper receives + translates**
-   - Wrapper accepts the OpenAI (or Anthropic messages) request.
-   - Applies its own rate limits (tune or disable for internal LiteLLM caller).
-   - Converts messages to prompt + system.
-   - Builds `ClaudeAgentOptions` (model, system_prompt, max_turns, allowed/disallowed_tools, permission_mode="bypassPermissions", resume/session).
-   - If `enable_tools` present in the request → use the safe DEFAULT_ALLOWED_TOOLS set; otherwise tools fully disabled for speed.
+4. **SDK executes** — `claude_agent_sdk.query()` spawns the bundled `claude` CLI binary
+   as a subprocess. `CLAUDE_CODE_AUTH_METHOD=cli` causes it to use the OAuth credentials
+   at `/root/.claude/.credentials.json` (which were synced from the host by
+   `bootstrap/sync-claude-credentials.sh`). `CLAUDE_CWD=/tmp` gives the agent a
+   writable working directory inside the sandbox.
 
-5. **SDK executes inside the sandbox (the agentic work)**
-   - `claude_agent_sdk.query(...)` runs.
-   - Auth: The sandbox was created with Bedrock credentials injected (same keys as the main LiteLLM; osbox already handles sourcing `.secrets/bedrock.env`, `--env` injection, and pre-trust for `/sandbox`).
-   - The SDK temporarily sets `CLAUDE_CODE_USE_BEDROCK=1` + AWS_* for the duration of the call (see `src/auth.py` + `src/claude_cli.py`).
-   - All filesystem work happens in `CLAUDE_CWD=/sandbox` (read-write per the existing `claude-code.yaml` policy).
-   - Network egress from the sandbox is strictly controlled by the same policy (Bedrock hosts + any anthropic for fallback/CLI; no arbitrary outbound).
-   - Multi-turn agent loops (tool use, bash, edits, reads) execute entirely inside the isolated container.
+5. **Anthropic API** — the bundled claude binary calls `api.anthropic.com` directly
+   over HTTPS (OAuth/Pro subscription). The sandbox policy permits this egress. This is
+   **not** Bedrock — no SigV4, no AWS credentials.
 
-6. **Backend inference (Bedrock direct)**
-   - The SDK makes the actual model calls directly to Bedrock (cross-region inference profiles).
-   - This is **not** routed back through LiteLLM for the "brain" — the wrapper is using the commercial Bedrock path.
-   - Policy allows exactly the required hosts (`bedrock-runtime.*.amazonaws.com`, `bedrock.*.amazonaws.com`) with L4 passthrough so SigV4 signatures are preserved.
-   - Real token counts and `total_cost_usd` come back in the SDK ResultMessage.
-
-7–9. **Response path (reverse)**
-   - SDK → wrapper (assembles OpenAI-shaped response, adds usage if requested).
-   - Wrapper → LiteLLM (via the same revproxy route).
-   - LiteLLM → original client.
-   - Session state (if `session_id` used) is kept in the wrapper (in-memory, auto-expires after 1h).
+6. **Response path** — agent result comes back through `claude_agent_sdk` → wrapper
+   (assembled into an OpenAI-shaped `ChatCompletion` response) → LiteLLM → original caller.
 
 ---
 
-## Contrast Path: Native `claude` inside sandbox (already supported)
+## Key Properties
 
-For cases where you want the native Claude Code TUI or scripted `-p` calls *inside* a sandbox (not exposing the agent as an OpenAI model):
-
-- Create with `osbox <name> --bedrock --headless` (or the ANTHROPIC_BASE_URL variant in the docs).
-- Inside: `claude` binary (or `claude -p "..."`) respects `ANTHROPIC_BASE_URL=https://inference.local` + dummy key.
-- `inference.local` is resolved by the OpenShell gateway → LiteLLM → Bedrock.
-- This path is what the current `claude-code.yaml` policy + `osbox` + `litellm-proxy.md` were primarily designed for.
-- The wrapper path is the "reverse": instead of the agent calling a proxied model, the *agent itself* becomes the model that outer clients call.
-
-Both can coexist.
-
----
-
-## Key Properties Preserved / Achieved
-
-- **Single credential boundary**: Only LiteLLM (and the injected Bedrock env into the specific wrapper sandbox) ever see the real AWS keys. OpenClaw director and most clients see only the LITELLM_MASTER_KEY.
-- **Nothing changes in nemoclaw**: The director probe and `openclaw.json` continue to list only the `litellm` provider. You just add the new model alias in the *central* `litellm/config.yaml`.
-- **Isolation**: Full OpenShell policy + container boundaries. The agent can only touch what the policy + mounted workdir allow. No host filesystem escape.
-- **Unified billing/logging**: All usage (normal models + claude-code agent sessions) appears in the same LiteLLM layer.
-- **Limits impact (June 15, 2026 change)**: Using the Bedrock auth path inside the wrapper sandbox makes this completely unaffected by the new Agent SDK monthly credit system (which targets consumer subscription + CLI auth paths). This is commercial Bedrock billing.
-- **Fast vs powerful**: Default requests are cheap/fast (tools off). Full coding agent power on demand via `enable_tools`.
+- **No AWS credentials in the sandbox.** The wrapper uses OAuth, not Bedrock. AWS keys
+  live only in the LiteLLM container, which handles the separate Bedrock path for
+  `claude-sonnet-4-6`.
+- **OpenShell isolation.** The wrapper runs inside an OpenShell sandbox. The agent's file
+  operations are scoped to `CLAUDE_CWD=/tmp` inside the container; the host filesystem is
+  not accessible.
+- **Docker ai-net reachability.** The sandbox is connected to the Docker `ai-net` bridge
+  with alias `claude-code-wrapper`, making it reachable as `http://claude-code-wrapper:8000`
+  from other ai-net containers (LiteLLM, Traefik, etc.).
+- **Nothing changes in NemoClaw.** The director probe adds the model to `openclaw.json`
+  idempotently on each start. The director itself continues to use `litellm` as its
+  only inference provider.
+- **Credential sync.** OAuth tokens expire. Run `bootstrap/sync-claude-credentials.sh`
+  after any `claude auth login` on the host to refresh the token in the sandbox. A
+  future systemd timer will automate this.
 
 ---
 
-## Open Items for the `claude-code-revproxy` Branch
+## Environment Variables (wrapper start)
 
-- Stable, discoverable address for the wrapper port (the revproxy mechanism).
-- Update `litellm/config.yaml` with one or more `claude-code-*` model entries (and any passthrough config for extra_body).
-- Optional: small enhancement to `osbox` for "wrapper mode" (pre-install the wrapper code or run the server as entrypoint, set rate limits high, generate a static API key).
-- Docs updates (point to this diagram).
-- End-to-end test: simple prompt, then a tool-using edit task, then multi-turn via session_id.
-- Optional: surface `claude-code-sonnet` (and opus/haiku) aliases in any UI pickers.
+| Variable | Value | Purpose |
+|---|---|---|
+| `CLAUDE_CODE_AUTH_METHOD` | `cli` | Use OAuth credentials, not Bedrock |
+| `API_KEY` | `claude-code-internal-revproxy-key-2026` | Bearer token that LiteLLM sends to the wrapper |
+| `RATE_LIMIT_ENABLED` | `false` | No rate limiting for internal caller |
+| `CLAUDE_CWD` | `/tmp` | Agent working directory inside sandbox |
 
-This architecture reuses almost everything already built (policy, osbox, gateway, LiteLLM as hub, Bedrock injection) while cleanly adding the "agent as a model" capability via the upstream wrapper project.
-
-Let me know if you want variations (e.g. wrapper also calling back through LiteLLM, multiple wrapper sandboxes, MCP integration notes, etc.) or if I should generate additional diagrams (sequence diagram, component view, etc.).
+Started by `bootstrap/setup-claude-revproxy.sh`:
+```bash
+docker exec -d \
+  -e CLAUDE_CODE_AUTH_METHOD=cli \
+  -e API_KEY=claude-code-internal-revproxy-key-2026 \
+  -e RATE_LIMIT_ENABLED=false \
+  -e CLAUDE_CWD=/tmp \
+  "$_SB" \
+  "$_UV_BIN/uvicorn" src.main:app --host 0.0.0.0 --port 8000 --app-dir /sandbox/wrapper
+```

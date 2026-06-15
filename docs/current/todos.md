@@ -5,9 +5,10 @@ See [platform.md](platform.md) for current state and
 
 ---
 
-## Immediate next steps (do these in order)
+## Post-clone / fresh-setup flow
 
-> Run these after pulling the latest commit on the homelab VM. Onboard (step 7) and director creation are complete; the director is live at `openclaw.lab.lan`. The recommended post-clone flow: setup-host → init-secrets → docker compose up → OpenShell wiring → NemoClaw onboard → probe service start → verify.
+> Run these after pulling the latest commit on the homelab VM. Docker Compose services,
+> NemoClaw director, and the claude-code wrapper must all be started in order.
 
 **1 — Activate Docker group in your shell** (one-time, if you just ran setup-host.sh):
 ```bash
@@ -16,42 +17,29 @@ newgrp docker
 docker ps   # should work without sudo
 ```
 
-**2 — Stop and clean up old Podman services** (decommission the old stack — run if coming from a pre-migration snapshot):
-```bash
-systemctl --user stop traefik portainer registry openclaw litellm 2>/dev/null || true
-systemctl --user disable traefik portainer registry openclaw litellm 2>/dev/null || true
-# Remove old Quadlet symlinks that are now dead
-find ~/.config/containers/systemd/ -type l | while read f; do
-  [ -e "$f" ] || rm "$f" && echo "removed broken symlink $f"
-done
-systemctl --user daemon-reload
-```
-
-**3 — Run init-secrets** (populates `.secrets/bedrock.env` + `.secrets/litellm.env`):
+**2 — Run init-secrets** (populates `.secrets/bedrock.env` + `.secrets/litellm.env`):
 ```bash
 init-secrets
 ```
 
-**4 — Copy non-secret config and start Docker services**:
+**3 — Copy non-secret config and start Docker services**:
 ```bash
 cp litellm/litellm.env.example litellm/litellm.env
 docker compose -f docker/compose.yml up -d
 docker compose -f docker/compose.yml ps   # all should be Up
 ```
 
-**5 — Smoke-test LiteLLM**:
+**4 — Smoke-test LiteLLM**:
 ```bash
 LITELLM_KEY=$(grep LITELLM_MASTER_KEY ~/home-lab/.secrets/litellm.env | cut -d= -f2)
 curl -s http://localhost:4000/v1/models -H "Authorization: Bearer ${LITELLM_KEY}" \
   | python3 -m json.tool
-# Should return claude-sonnet-4-6 in the model list
+# Should return claude-sonnet-4-6, claude-code-wrapper-local, and aliases
 ```
 
-**6 — Wire OpenShell inference routing** (one-time; existing provider can be updated):
+**5 — Wire OpenShell inference routing** (one-time; existing provider can be updated):
 ```bash
 LITELLM_KEY=$(grep LITELLM_MASTER_KEY ~/home-lab/.secrets/litellm.env | cut -d= -f2)
-# If a litellm-local provider already exists, delete it first:
-# openshell provider delete --name litellm-local
 openshell provider create \
     --name litellm-local --type openai \
     --credential "OPENAI_API_KEY=${LITELLM_KEY}" \
@@ -60,7 +48,7 @@ openshell inference set --no-verify --provider litellm-local --model claude-sonn
 openshell inference get   # confirm provider=litellm-local, model=claude-sonnet-4-6
 ```
 
-**7 — Install NemoClaw** (interactive — have the LiteLLM key from step 3 ready):
+**6 — Install NemoClaw** (interactive — have the LiteLLM key from step 2 ready):
 ```bash
 curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash
 # During 'nemoclaw onboard', when asked for inference provider:
@@ -68,41 +56,53 @@ curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash
 #   → API key: <LITELLM_MASTER_KEY from .secrets/litellm.env>
 #   → Base URL: http://localhost:4000/v1
 #   → Model: claude-sonnet-4-6
-# (See new "Troubleshoot director" section below for Bad Gateway / Provisioning issues.)
 ```
 
-**8 — Start the probe service** (wires NemoClaw patches + socat relay + port forward):
+**7 — Start the probe service** (patches NemoClaw director and starts openclaw gateway):
 ```bash
 systemctl --user enable --now nemoclaw-director-control-ui
-systemctl --user status nemoclaw-director-control-ui   # should be active (exited) — normal
+systemctl --user status nemoclaw-director-control-ui   # active (exited) is normal
 
-# The probe does: CORS patch → provider rename → auth shim → socat relay → nemoclaw director connect --probe-only
-# After success: openclaw.lab.lan should return 200 (Traefik → socat relay 172.18.0.1:18789 → SSH tunnel → director).
+# The probe: CORS patch → provider rename → claude-code-wrapper-local add →
+#            pass-through shim → ai-net connect → openclaw gateway start (as sandbox user)
 # Verify:
 curl -sk -H 'Host: openclaw.lab.lan' https://localhost/ -o /dev/null -w "%{http_code}\n"
 # Expect: 200
-
-# traefik/dynamic/openclaw-nemoclaw.yml is pre-placed in the repo — do NOT change the backend URL to
-# 127.0.0.1:18789; it must remain 172.18.0.1:18789. Traefik is in a Docker container and cannot
-# reach the host's loopback. The socat relay bridges Docker bridge → SSH tunnel.
-# See TROUBLESHOOTING.md for the full explanation.
 ```
 
-**9 — (Re)create claude-code sandbox on the lab gateway (post-nemoclaw / after any driver or CLI skew)**:
+**8 — Start the claude-code wrapper sandbox**:
 ```bash
-# Always use the lab gateway explicitly (17670) + the 0.0.62 binary (/usr/bin after restore).
-# The nemoclaw install leaves a 0.0.44 CLI in .local/.npm-global that may take precedence in PATH.
-/usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure sandbox delete claude-code 2>/dev/null || true
-/usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure sandbox create --name claude-code --no-auto-providers \
+# First create the sandbox if it doesn't exist:
+/usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure \
+  sandbox create --name claude-revproxy --no-auto-providers \
+  --policy ~/home-lab/openshell/policies/claude-code.yaml
+
+# Then log in to Claude on the host and sync credentials:
+claude auth login   # interactive OAuth — run on host, not in sandbox
+bootstrap/sync-claude-credentials.sh
+
+# Start the wrapper:
+bootstrap/setup-claude-revproxy.sh
+# Verifies: sandbox connected to ai-net as claude-code-wrapper, uvicorn on :8000
+```
+
+**9 — (Re)create claude-code sandbox on the lab gateway** (for interactive use):
+```bash
+# Always use the lab gateway explicitly (17670) + the 0.0.62 binary.
+/usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure \
+  sandbox delete claude-code 2>/dev/null || true
+/usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure \
+  sandbox create --name claude-code --no-auto-providers \
     --policy ~/home-lab/openshell/policies/claude-code.yaml \
     --env ANTHROPIC_BASE_URL=https://inference.local \
     --env ANTHROPIC_API_KEY=unused \
     -- claude
-# (Use https://... if the lab gateway is running with TLS/mTLS certs.)
-# Then: /usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure sandbox connect claude-code
-# Inside: claude login (if using subscription) or just tasks (inference.local → lab gateway → litellm).
 ```
-(See "Update setup-host.sh" and "Dual gateway / post-nemoclaw claude-code" todos below.)
+
+> **Post-nemoclaw note:** After `nemoclaw onboard` the default openshell CLI may
+> be 0.0.44. Always use `/usr/bin/openshell` + `--gateway-endpoint http://127.0.0.1:17670
+> --gateway-insecure` for lab sandbox commands. Then:
+> `ln -sfn ~/home-lab/openshell/gateway.env ~/.config/openshell/gateway.env`
 
 ---
 
@@ -110,7 +110,8 @@ curl -sk -H 'Host: openclaw.lab.lan' https://localhost/ -o /dev/null -w "%{http_
 
 Migrated from rootless Podman Quadlets to Docker Engine + Docker Compose.
 OpenClaw moved from a Podman Quadlet to NemoClaw (NVIDIA-managed, runs OpenClaw
-inside an OpenShell sandbox).
+inside an OpenShell sandbox). claude-code-wrapper-local added as a second agentic
+model (OAuth path, no Bedrock credentials in the sandbox).
 
 - [x] Install Docker Engine and add `debian` to docker group
 - [x] Create `docker/compose.yml` — Traefik, Portainer, Registry, LiteLLM
@@ -119,22 +120,27 @@ inside an OpenShell sandbox).
 - [x] Update `bootstrap/setup-host.sh` — Docker steps replace Quadlet steps
 - [x] Update `bootstrap/init-secrets.sh` — env files only, no Podman secrets
 - [x] Update `projects/_template/` — Docker Compose is the standard pattern
-- [x] Update docs
+- [x] NemoClaw director "Ready"; `openclaw.lab.lan` returns 200; dashboard loads
+- [x] Routing: Traefik → `openclaw-director:18789` (Docker network alias on ai-net) — no SSH tunnel or socat
+- [x] Probe service (`nemoclaw-director-control-ui`): CORS patch, litellm-only provider, claude-code-wrapper-local model add, pass-through shim, ai-net connect, openclaw gateway start
+- [x] OpenClaw model picker: `litellm/claude-sonnet-4-6` (Bedrock) + `litellm/claude-code-wrapper-local` (wrapper)
+- [x] `openshell-claude-revproxy` sandbox: `claude-code-openai-wrapper` running on :8000; OAuth/Pro; no Bedrock creds
+- [x] LiteLLM routing: three aliases (`claude-code-wrapper-local`, `claude-code-sonnet`, `claude-code/sonnet`) → `http://claude-code-wrapper:8000/v1`
+- [x] End-to-end verified: OpenClaw → LiteLLM → claude-revproxy sandbox → Claude Code (OAuth) → Anthropic
+- [x] Static Traefik routes + dashboard workaround pre-placed and hot-reloading (file provider)
+- [x] gateway.env restore documented + symlink step in setup-host + post-nemoclaw notes
+- [x] All claude-code / lab examples updated to explicit `/usr/bin/openshell` + 17670 endpoint form
+- [x] `bootstrap/setup-claude-revproxy.sh` — wrapper start script (idempotent)
+- [x] `bootstrap/sync-claude-credentials.sh` — OAuth credential sync from host to sandbox
 
 ### Remaining
 
-- [x] **openclaw.lab.lan Bad Gateway** ✅ fixed (2026-06-14) — root cause: Traefik runs inside a Docker container and cannot reach `127.0.0.1:18789` (the SSH tunnel NemoClaw binds on the host's loopback only). Fix: `bootstrap/nemoclaw-director-probe.sh` now starts a socat relay on the Docker bridge gateway (`172.18.0.1:18789 → 127.0.0.1:18789`); `traefik/dynamic/openclaw-nemoclaw.yml` updated to `http://172.18.0.1:18789`. Both socat and SSH tunnel live in the probe service's cgroup and restart on boot or `nemoclaw director rebuild`. See TROUBLESHOOTING.md.
-- [ ] **Finalize bootstrap/setup-host.sh for full reproducibility**: script covers Docker/OpenShell/gateway.env/mkcert/tools; post-nemoclaw probe service enable step not yet scripted. Verify on a clean checkout: setup-host → init-secrets → docker compose up → nemoclaw onboard → `systemctl --user enable --now nemoclaw-director-control-ui` → verify all routes.
-- [ ] **Verify full end-to-end reproducibility** (see above): clean VM/snapshot, run the whole flow, confirm both gateways, claude-code Ready (inference.local), director Ready, openclaw.lab.lan + traefik.dashboard/ + litellm smoke all work, policies effective. Update this item when a full repro succeeds end-to-end.
-- [ ] **Traefik Docker provider version skew**: Persistent "client version 1.24 too old" (even with DOCKER_API_VERSION=1.41 env in compose). We rely on static `traefik/dynamic/traefik-dashboard.yml` (for dashboard) + `openclaw-nemoclaw.yml`. Documented in traefik/README.md and TROUBLESHOOTING. Fix later (newer Traefik image/SDK or socket proxy) or accept static files for critical routers.
-- [ ] **Clean up 10.89 alias + iptables** (session workaround for nemoclaw gw bind/reachability from legacy Podman subnets) once director is stable/Ready and no longer required.
-- [ ] **Persist / make robust the lab 17670 gateway** (systemd service can get taken over by nemoclaw metadata after onboard). Prefer explicit `--gateway-endpoint http://127.0.0.1:17670 --gateway-insecure` (or https) for all lab commands; or add a dedicated user service/unit for the 0.0.62 side.
-- [x] (done) Static Traefik routes + dashboard workaround pre-placed and hot-reloading (file provider).
-- [x] (done) gateway.env restore documented + symlink step in setup-host + post-nemoclaw notes everywhere.
-- [x] (done) All claude-code / lab examples updated to explicit /usr/bin + 17670 endpoint form.
-- [x] (done) DOCKER_API_VERSION, dual-gw reality, 0.0.62 re-install, container cleans, lock/pkill, cert paths, LiteLLM wiring, onboard-driven config captured in docs + TROUBLESHOOTING.
-
-(Immediate 1-9 steps below remain the recommended post-clone / post-setup flow; they are still valid.)
+- [ ] **Finalize bootstrap/setup-host.sh for full reproducibility**: script covers Docker/OpenShell/gateway.env/mkcert/tools; probe service enable + wrapper setup not yet scripted. Verify on a clean checkout: setup-host → init-secrets → docker compose up → nemoclaw onboard → probe start → wrapper start → verify all routes.
+- [ ] **Verify full end-to-end reproducibility**: clean VM/snapshot, run the whole flow, confirm both gateways, claude-code Ready (inference.local), director Ready, openclaw.lab.lan + traefik.dashboard/ + litellm smoke + claude-code-wrapper-local all work.
+- [ ] **Traefik Docker provider version skew**: Persistent "client version 1.24 too old" logged. We rely on static `traefik/dynamic/` routes for openclaw and dashboard. Fix later (newer Traefik image or socket proxy) or continue with static files.
+- [ ] **Persist lab 17670 gateway** — nemoclaw onboard can re-take precedence in PATH. Prefer explicit `/usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure` for all lab commands; or add a dedicated user service for the 0.0.62 side.
+- [ ] **systemd timer for `sync-claude-credentials.sh`** — OAuth tokens expire. Add an hourly (or daily) timer to keep the `openshell-claude-revproxy` sandbox credentials fresh without manual runs.
+- [ ] **Wrapper auto-start on reboot** — `setup-claude-revproxy.sh` is currently run manually. Add a systemd `--user` service (similar to `nemoclaw-director-control-ui`) that starts the wrapper automatically on login/boot.
 
 ---
 
