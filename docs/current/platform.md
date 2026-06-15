@@ -71,8 +71,9 @@
 | LiteLLM | Docker Compose | `https://litellm.lab.lan`, `:4000` internal — routes to Bedrock (claude-sonnet-4-6) and the claude-code wrapper | ✅ |
 | OpenShell gateway (lab) | systemd `--user` | `0.0.0.0:17670` (mTLS), Docker driver, 0.0.62 binaries | ✅ |
 | OpenShell gateway (nemoclaw) | managed by nemoclaw | `127.0.0.1:8080` plaintext, 0.0.44 | ✅ (for director) |
-| OpenClaw director | NemoClaw-managed sandbox | `openclaw.lab.lan` (Traefik file route → Docker alias `openclaw-director:18789`) — models: `litellm/claude-sonnet-4-6` + `litellm/claude-code-wrapper-local`; token auth; CORS/provider patches persistent via `nemoclaw-director-control-ui` probe service | ✅ live |
+| OpenClaw director | NemoClaw-managed sandbox | `openclaw.lab.lan` (Traefik file route → Docker alias `openclaw-director:18789`) — models: `litellm/claude-sonnet-4-6`, `litellm/claude-code-wrapper-local`, `litellm/grok-wrapper-local`; token auth; CORS/provider patches persistent via `nemoclaw-director-control-ui` probe service | ✅ live |
 | claude-revproxy sandbox | OpenShell (lab gw 17670) | ai-net alias `claude-code-wrapper:8000` — `claude-code-openai-wrapper` (uvicorn); OAuth/Pro → `api.anthropic.com`; no AWS credentials | ✅ live |
+| grok-wrapper sandbox | OpenShell (lab gw 17670) | ai-net alias `grok-wrapper:8001` — `grok-openai-wrapper` (uvicorn); spawns Grok Build CLI; OAuth/Grok subscription → xAI; no AWS credentials | ✅ live |
 
 ### Agent sandbox architecture
 
@@ -81,6 +82,7 @@ NemoClaw (host CLI — manages OpenClaw lifecycle)
    └── director sandbox (OpenClaw — openclaw.lab.lan)
          models: litellm/claude-sonnet-4-6         → LiteLLM → Bedrock
                  litellm/claude-code-wrapper-local  → LiteLLM → claude-revproxy sandbox
+                 litellm/grok-wrapper-local         → LiteLLM → grok-wrapper sandbox
 
 Routing chain for openclaw.lab.lan:
   Browser → Traefik → openclaw-director:18789 (Docker network alias on ai-net) → director sandbox
@@ -89,8 +91,10 @@ Routing chain for openclaw.lab.lan:
 OpenShell lab gateway (17670, Docker driver, mTLS, 0.0.62 /usr/bin)
   inference.local → litellm-local → http://localhost:4000/v1
     ├── claude-code sandbox (Ready; ANTHROPIC_BASE_URL=https://inference.local; interactive use)
-    ├── claude-revproxy sandbox (Ready; uvicorn :8000; CLAUDE_CODE_AUTH_METHOD=cli → OAuth)
+    ├── claude-revproxy sandbox (Ready; uvicorn :8000; spawns claude CLI → OAuth)
     │     connected to ai-net with alias claude-code-wrapper (outbound to api.anthropic.com)
+    ├── grok-wrapper sandbox (Ready; uvicorn :8001; spawns grok CLI → OAuth)
+    │     connected to ai-net with alias grok-wrapper (outbound to auth.x.ai + api.x.ai)
     ├── codex sandbox (Phase 5)
     └── gemini sandbox (Phase 6)
 
@@ -103,11 +107,15 @@ LiteLLM model routing (Docker Compose, ai-net, :4000):
   claude-code-sonnet         → http://claude-code-wrapper:8000/v1  (claude-revproxy sandbox)
   claude-code/sonnet         → http://claude-code-wrapper:8000/v1  (alias)
   claude-code-wrapper-local  → http://claude-code-wrapper:8000/v1  (alias, shown in OpenClaw picker)
+  grok-wrapper-local         → http://grok-wrapper:8001/v1  (grok-wrapper sandbox, shown in OpenClaw picker)
+  grok-beta                  → http://grok-wrapper:8001/v1  (alias)
 ```
 
 **LiteLLM** is the single inference credential boundary. Bedrock routes hold the only AWS credentials.
 The claude-code wrapper uses OAuth (no AWS keys); credentials are synced from `~/.claude/.credentials.json`
 on the host to `/root/.claude/.credentials.json` in the sandbox via `bootstrap/sync-claude-credentials.sh`.
+The grok wrapper uses OAuth (no AWS keys); credentials are synced from `~/.grok/auth.json`
+on the host to `/root/.grok/auth.json` in the sandbox via `bootstrap/sync-grok-credentials.sh`.
 
 **NemoClaw** is NVIDIA's managed stack that runs OpenClaw inside an OpenShell sandbox.
 This provides proper isolation for the director itself. The probe service
@@ -177,9 +185,11 @@ OAuth (no AWS keys). Worker sandboxes that use `inference.local` hold no credent
 |---|---|
 | `bootstrap/setup-host.sh` | Idempotent host setup: Docker, Node 22, OpenShell, mkcert, PATH tools |
 | `bootstrap/init-secrets.sh` | Interactive: Bedrock keys + LiteLLM key → `.secrets/` |
-| `bootstrap/nemoclaw-director-probe.sh` | Run by `nemoclaw-director-control-ui` systemd unit — patches openclaw.json, connects to ai-net, starts openclaw gateway |
+| `bootstrap/nemoclaw-director-probe.sh` | Run by `nemoclaw-director-control-ui` systemd unit — patches openclaw.json (adds all wrapper models), connects to ai-net, starts openclaw gateway |
 | `bootstrap/setup-claude-revproxy.sh` | Start the claude-code wrapper inside the `openshell-claude-revproxy` sandbox; idempotent |
 | `bootstrap/sync-claude-credentials.sh` | Copy host `~/.claude/.credentials.json` → sandbox `/root/.claude/`; run after `claude auth login` |
+| `bootstrap/setup-grok-wrapper.sh` | Start the grok wrapper inside the `openshell-grok-wrapper` sandbox; idempotent |
+| `bootstrap/sync-grok-credentials.sh` | Copy host `~/.grok/auth.json` → sandbox `/root/.grok/`; run after `grok login` |
 | `bootstrap/osbox` | OpenShell sandbox launcher helper; `--wrapper` connects sandbox to ai-net as claude-code-wrapper |
 
 ### Reproducing this host
@@ -210,7 +220,8 @@ Outstanding work lives in **[todos.md](todos.md)**. Current state:
 - ✅ Phase 4 — OpenClaw live (previously as Podman Quadlet; migrated to NemoClaw in Phase 7)
 - ✅ Phase 4.5 — LiteLLM proxy live (Bedrock routing verified; migrated to Docker Compose)
 - ✅ Phase 7 — **Docker + NemoClaw migration** fully live (2026-06-13/14). Director "Ready"; `openclaw.lab.lan` live; both models functional in picker. Routing: Traefik → `openclaw-director:18789` (Docker network alias on ai-net). Probe service handles: CORS patch, litellm-only provider, pass-through shim, ai-net connect, openclaw gateway start.
-- ✅ **claude-code-wrapper-local** — claude-code-openai-wrapper running in `openshell-claude-revproxy` sandbox; OAuth/Pro subscription auth; LiteLLM routes three aliases to `http://claude-code-wrapper:8000/v1`; verified end-to-end via OpenClaw director session (Harbor Freight question → Claude Code → Anthropic).
+- ✅ **claude-code-wrapper-local** — claude-code-openai-wrapper running in `openshell-claude-revproxy` sandbox; OAuth/Pro subscription auth; LiteLLM routes three aliases to `http://claude-code-wrapper:8000/v1`; verified end-to-end via OpenClaw director.
+- ✅ **grok-wrapper-local** — grok-openai-wrapper running in `openshell-grok-wrapper` sandbox; spawns Grok Build CLI; OAuth/Grok subscription auth; LiteLLM routes two aliases to `http://grok-wrapper:8001/v1`; verified end-to-end via LiteLLM.
 - ⬜ Phase 5 — Codex CLI sandbox (`osbox --codex`)
 - ⬜ Phase 6 — Gemini CLI sandbox (`osbox --gemini`)
 - ⬜ Phase 8 — Evaluate Podman support in future NemoClaw releases; restore Podman-based services if supported

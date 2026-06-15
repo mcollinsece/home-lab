@@ -176,6 +176,43 @@ except Exception as e:
     print("error: " + str(e), file=sys.stderr)
 PY
 
+# ── 3b. Ensure grok-wrapper-local model is in providers.litellm.models ──────────
+say "Ensuring grok-wrapper-local model entry in openclaw.json litellm provider..."
+docker exec -i -u root "$_DIRECTOR_CONTAINER" python3 - << 'PY'
+import json, subprocess, sys
+cfg = "/sandbox/.openclaw/openclaw.json"
+hf  = "/sandbox/.openclaw/.config-hash"
+try:
+    with open(cfg) as f:
+        data = json.load(f)
+    provider_models = data.setdefault("models", {}).setdefault("providers", {}).setdefault("litellm", {}).setdefault("models", [])
+    new_id = "grok-wrapper-local"
+    if any(m.get("id") == new_id for m in provider_models):
+        print("already-ok")
+        sys.exit(0)
+    provider_models.append({
+        "compat": {"supportsStore": False},
+        "id": new_id,
+        "name": "litellm/grok-wrapper-local",
+        "reasoning": True,
+        "input": ["text", "image"],
+        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+        "contextWindow": 131072,
+        "maxTokens": 65536
+    })
+    with open(cfg, "w") as f:
+        json.dump(data, f, indent=2)
+    r = subprocess.run(["sh", "-c", "cd /sandbox/.openclaw && sha256sum openclaw.json"],
+                       capture_output=True, text=True)
+    with open(hf, "w") as f:
+        f.write(r.stdout)
+    subprocess.run(["chown", "sandbox:sandbox", hf])
+    subprocess.run(["chmod", "660", hf])
+    print("added grok-wrapper-local to litellm provider models")
+except Exception as e:
+    print("error: " + str(e), file=sys.stderr)
+PY
+
 # ── 3. Litellm-only model config ────────────────────────────────────────────────
 say "Ensuring litellm model entry is explicit for session picker (no anthropic/claude-agent)..."
 _CLICFG_RESULT=$(docker exec -i -u root "$_DIRECTOR_CONTAINER" python3 - << 'PY'
@@ -188,7 +225,7 @@ try:
     defaults = data.setdefault("agents", {}).setdefault("defaults", {})
     models_cfg = defaults.setdefault("models", {})
     added = []
-    for mname in ["litellm/claude-sonnet-4-6", "litellm/claude-code-wrapper-local"]:
+    for mname in ["litellm/claude-sonnet-4-6", "litellm/claude-code-wrapper-local", "litellm/grok-wrapper-local"]:
         if mname not in models_cfg:
             models_cfg[mname] = {}
             added.append(mname)

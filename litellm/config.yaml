@@ -59,6 +59,33 @@ model_list:
   #     api_base: http://host.docker.internal:11434/v1
   #     api_key: none
 
+  # --- grok agent via wrapper ---
+  # Runs inside openshell-grok-wrapper sandbox (OpenShell isolation).
+  # - Inbound: LiteLLM reverse-proxies here; OpenClaw sees Grok as a model.
+  # - Outbound: wrapper calls xAI API directly with Grok subscription token.
+  #   No Bedrock credentials in the sandbox — auth is xAI API key.
+  # Sandbox is connected to ai-net with alias "grok-wrapper".
+  # Restart wrapper after reboot: see bootstrap/setup-grok-wrapper.sh
+  - model_name: grok-wrapper-local
+    litellm_params:
+      model: openai/grok-beta
+      api_base: http://grok-wrapper:8001/v1
+      api_key: grok-internal-revproxy-key-2026
+    model_info:
+      max_tokens: 131072
+      max_input_tokens: 131072
+      max_output_tokens: 65536
+
+  - model_name: grok-beta
+    litellm_params:
+      model: openai/grok-beta
+      api_base: http://grok-wrapper:8001/v1
+      api_key: grok-internal-revproxy-key-2026
+    model_info:
+      max_tokens: 131072
+      max_input_tokens: 131072
+      max_output_tokens: 65536
+
   # --- claude-code agent via wrapper ---
   # Runs inside openshell-claude-revproxy sandbox (OpenShell isolation).
   # - Inbound: LiteLLM reverse-proxies here; OpenClaw sees the full Claude Code agent as a model.

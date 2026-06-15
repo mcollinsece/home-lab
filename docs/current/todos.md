@@ -133,14 +133,25 @@ model (OAuth path, no Bedrock credentials in the sandbox).
 - [x] `bootstrap/setup-claude-revproxy.sh` — wrapper start script (idempotent)
 - [x] `bootstrap/sync-claude-credentials.sh` — OAuth credential sync from host to sandbox
 
+### Grok Wrapper Integration (2026-06-15) ✅ DONE
+
+- [x] **grok-wrapper-local** — grok-openai-wrapper running in `openshell-grok-wrapper` sandbox
+- [x] Spawns Grok Build CLI (`grok --single --output-format json`)
+- [x] OAuth/Grok subscription auth (synced from `~/.grok/auth.json`)
+- [x] LiteLLM routing: two aliases (`grok-wrapper-local`, `grok-beta`) → `http://grok-wrapper:8001/v1`
+- [x] End-to-end verified: LiteLLM → grok-wrapper sandbox → Grok Build CLI → xAI
+- [x] `bootstrap/setup-grok-wrapper.sh` — wrapper start script (idempotent)
+- [x] `bootstrap/sync-grok-credentials.sh` — OAuth credential sync from host to sandbox
+- [x] Probe service updated to add `grok-wrapper-local` to director model picker
+
 ### Remaining
 
-- [ ] **Finalize bootstrap/setup-host.sh for full reproducibility**: script covers Docker/OpenShell/gateway.env/mkcert/tools; probe service enable + wrapper setup not yet scripted. Verify on a clean checkout: setup-host → init-secrets → docker compose up → nemoclaw onboard → probe start → wrapper start → verify all routes.
-- [ ] **Verify full end-to-end reproducibility**: clean VM/snapshot, run the whole flow, confirm both gateways, claude-code Ready (inference.local), director Ready, openclaw.lab.lan + traefik.dashboard/ + litellm smoke + claude-code-wrapper-local all work.
+- [ ] **Finalize bootstrap/setup-host.sh for full reproducibility**: script covers Docker/OpenShell/gateway.env/mkcert/tools; probe service enable + both wrapper setups not yet scripted. Verify on a clean checkout: setup-host → init-secrets → docker compose up → nemoclaw onboard → probe start → both wrappers start → verify all routes.
+- [ ] **Verify full end-to-end reproducibility**: clean VM/snapshot, run the whole flow, confirm both gateways, claude-code Ready (inference.local), director Ready, openclaw.lab.lan + traefik.dashboard/ + litellm smoke + both wrappers (claude-code-wrapper-local + grok-wrapper-local) all work.
 - [ ] **Traefik Docker provider version skew**: Persistent "client version 1.24 too old" logged. We rely on static `traefik/dynamic/` routes for openclaw and dashboard. Fix later (newer Traefik image or socket proxy) or continue with static files.
 - [ ] **Persist lab 17670 gateway** — nemoclaw onboard can re-take precedence in PATH. Prefer explicit `/usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure` for all lab commands; or add a dedicated user service for the 0.0.62 side.
-- [ ] **systemd timer for `sync-claude-credentials.sh`** — OAuth tokens expire. Add an hourly (or daily) timer to keep the `openshell-claude-revproxy` sandbox credentials fresh without manual runs.
-- [ ] **Wrapper auto-start on reboot** — `setup-claude-revproxy.sh` is currently run manually. Add a systemd `--user` service (similar to `nemoclaw-director-control-ui`) that starts the wrapper automatically on login/boot.
+- [ ] **systemd timer for credential syncs** — OAuth tokens expire. Add hourly (or daily) timers for both `sync-claude-credentials.sh` and `sync-grok-credentials.sh` to keep wrapper sandbox credentials fresh without manual runs.
+- [ ] **Wrapper auto-start on reboot** — Both wrapper setup scripts are currently run manually. Add systemd `--user` services (similar to `nemoclaw-director-control-ui`) that start both wrappers automatically on login/boot.
 
 ---
 

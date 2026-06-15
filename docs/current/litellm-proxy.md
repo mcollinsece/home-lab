@@ -10,8 +10,8 @@
 All pay-per-token inference routes through one OpenAI-compatible endpoint.
 Backend changes happen in one config file. CLI tools inside agent sandboxes never
 hold real credentials — they talk to `inference.local`, which the OpenShell gateway
-routes to LiteLLM. The Claude Code agent wrapper surfaces as just another model name
-behind LiteLLM; callers never know they are hitting a full agentic runtime.
+routes to LiteLLM. Agent wrappers (Claude Code, Grok Build) surface as model names
+behind LiteLLM; callers never know they are hitting full agentic runtimes with OAuth subscriptions.
 
 ---
 
@@ -35,16 +35,17 @@ OpenShell gateway                                        │
                                            (sandbox is also on ai-net, alias: claude-code-wrapper)
 ```
 
-**Two auth paths, one credential boundary:**
+**Three auth paths, one credential boundary:**
 
 | Route | Auth method | Credential holder |
 |---|---|---|
 | `claude-sonnet-4-6` → Bedrock | AWS SigV4 | LiteLLM container only |
 | `claude-code-wrapper-local` → wrapper | OAuth/Pro subscription | sandbox `/root/.claude/` (synced from host) |
+| `grok-wrapper-local` → wrapper | OAuth/Grok subscription | sandbox `/root/.grok/` (synced from host) |
 
 The CLI tools inside inference.local sandboxes (claude-code, codex, gemini) never hold
 credentials — they point at `inference.local` and LiteLLM fills in the backend.
-OpenClaw / any other LiteLLM client sees both Bedrock models and the claude-code agent
+OpenClaw / any other LiteLLM client sees Bedrock models, Claude Code agent, and Grok Build agent
 as interchangeable model names.
 
 ---
@@ -53,10 +54,11 @@ as interchangeable model names.
 
 | Component | What it does |
 |---|---|
-| **LiteLLM** (Docker Compose service) | OpenAI-compatible proxy; sole holder of Bedrock creds; routes Bedrock models and reverse-proxies the claude-code wrapper |
+| **LiteLLM** (Docker Compose service) | OpenAI-compatible proxy; sole holder of Bedrock creds; routes Bedrock models and reverse-proxies agent wrappers (Claude Code, Grok Build) |
 | **OpenShell provider `litellm-local`** | Routes `inference.local` from the gateway to LiteLLM at `http://localhost:4000/v1` |
-| **NemoClaw OpenClaw** | Configured with LiteLLM as the OpenAI-compatible provider; models: `litellm/claude-sonnet-4-6` and `litellm/claude-code-wrapper-local` |
-| **claude-revproxy sandbox** | OpenShell sandbox running `claude-code-openai-wrapper`; connected to ai-net as `claude-code-wrapper`; outbound via OAuth |
+| **NemoClaw OpenClaw** | Configured with LiteLLM as the OpenAI-compatible provider; models: `litellm/claude-sonnet-4-6`, `litellm/claude-code-wrapper-local`, `litellm/grok-wrapper-local` |
+| **claude-revproxy sandbox** | OpenShell sandbox running `claude-code-openai-wrapper`; connected to ai-net as `claude-code-wrapper`; spawns `claude` CLI; OAuth to api.anthropic.com |
+| **grok-wrapper sandbox** | OpenShell sandbox running `grok-openai-wrapper`; connected to ai-net as `grok-wrapper`; spawns `grok` CLI; OAuth to xAI |
 
 ---
 
@@ -97,8 +99,23 @@ model_list:
       model: bedrock/us.anthropic.claude-sonnet-4-6
       # ... same Bedrock params
 
+  # grok agent via wrapper (two aliases for the same sandbox endpoint)
+  # Auth: Grok Build CLI with OAuth (Grok subscription, no AWS keys)
+  # Spawns: grok --single --output-format json
+  - model_name: grok-wrapper-local
+    litellm_params:
+      model: openai/grok-beta
+      api_base: http://grok-wrapper:8001/v1
+      api_key: grok-internal-revproxy-key-2026
+
+  - model_name: grok-beta
+    litellm_params:
+      model: openai/grok-beta
+      api_base: http://grok-wrapper:8001/v1
+      api_key: grok-internal-revproxy-key-2026
+
   # claude-code agent via wrapper (three aliases for the same sandbox endpoint)
-  # Auth: CLAUDE_CODE_AUTH_METHOD=cli (OAuth/Pro subscription, no AWS keys)
+  # Auth: claude_agent_sdk with OAuth (Pro subscription, no AWS keys)
   - model_name: claude-code-wrapper-local
     litellm_params:
       model: openai/claude-sonnet-4-6
@@ -147,6 +164,10 @@ Populated by `init-secrets`. Injected into the Docker Compose `litellm` service 
 The claude-code wrapper uses OAuth (no AWS keys). Its credentials live at
 `~/.claude/.credentials.json` on the host and are synced to the sandbox via
 `bootstrap/sync-claude-credentials.sh`.
+
+The grok wrapper uses OAuth (no AWS keys). Its credentials live at
+`~/.grok/auth.json` on the host and are synced to the sandbox via
+`bootstrap/sync-grok-credentials.sh`.
 
 ---
 
@@ -203,6 +224,11 @@ openshell sandbox create --name claude-code --no-auto-providers \
 # After create, run: bootstrap/setup-claude-revproxy.sh
 openshell sandbox create --name claude-revproxy --no-auto-providers \
     --policy openshell/policies/claude-code.yaml
+
+# grok wrapper sandbox (persistent, serves as model endpoint)
+# After create, run: bootstrap/setup-grok-wrapper.sh
+openshell sandbox create --name grok-wrapper --no-auto-providers \
+    --policy openshell/policies/grok.yaml
 
 # Codex sandbox (Phase 5)
 openshell sandbox create --name codex --no-auto-providers \
@@ -265,6 +291,12 @@ bootstrap/setup-claude-revproxy.sh
 
 # Sync OAuth credentials to the wrapper sandbox (after claude auth login on host)
 bootstrap/sync-claude-credentials.sh
+
+# Start / restart the grok wrapper (after reboot or sandbox rebuild)
+bootstrap/setup-grok-wrapper.sh
+
+# Sync OAuth credentials to the grok wrapper sandbox (after grok login on host)
+bootstrap/sync-grok-credentials.sh
 
 # Check wrapper is listening
 _SB=$(docker ps --filter 'name=openshell-claude-revproxy-' --format '{{.Names}}' | head -1)
