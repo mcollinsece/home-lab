@@ -59,6 +59,44 @@ model_list:
   #     api_base: http://host.docker.internal:11434/v1
   #     api_key: none
 
+  # --- claude-code agent via wrapper ---
+  # Runs inside openshell-claude-revproxy sandbox (OpenShell isolation).
+  # - Inbound: LiteLLM reverse-proxies here; OpenClaw sees the full Claude Code agent as a model.
+  # - Outbound: wrapper uses claude_agent_sdk (bundled claude CLI) with OAuth / Pro subscription.
+  #   No Bedrock credentials in the sandbox — auth is purely claude.ai OAuth.
+  # Sandbox is connected to ai-net with alias "claude-code-wrapper".
+  # Restart wrapper after reboot: see bootstrap/setup-claude-revproxy.sh
+  # Credentials sync: bootstrap/sync-claude-credentials.sh (copy host ~/.claude to sandbox /root/.claude)
+  - model_name: claude-code-sonnet
+    litellm_params:
+      model: openai/claude-sonnet-4-6
+      api_base: http://claude-code-wrapper:8000/v1
+      api_key: claude-code-internal-revproxy-key-2026
+    model_info:
+      max_tokens: 64000
+      max_input_tokens: 128000
+      max_output_tokens: 64000
+
+  - model_name: claude-code/sonnet
+    litellm_params:
+      model: openai/claude-sonnet-4-6
+      api_base: http://claude-code-wrapper:8000/v1
+      api_key: claude-code-internal-revproxy-key-2026
+    model_info:
+      max_tokens: 64000
+      max_input_tokens: 128000
+      max_output_tokens: 64000
+
+  - model_name: claude-code-wrapper-local
+    litellm_params:
+      model: openai/claude-sonnet-4-6
+      api_base: http://claude-code-wrapper:8000/v1
+      api_key: claude-code-internal-revproxy-key-2026
+    model_info:
+      max_tokens: 64000
+      max_input_tokens: 128000
+      max_output_tokens: 64000
+
 litellm_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
 

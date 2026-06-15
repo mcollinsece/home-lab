@@ -3,7 +3,7 @@
 # osbox — spin up an auth-ready OpenShell agent sandbox
 #
 # Usage:
-#   osbox <name> [--bedrock] [--claudeai | --clone <src-sandbox>] [--headless]
+#   osbox <name> [--bedrock] [--claudeai | --clone <src-sandbox>] [--headless] [--wrapper]
 #
 # Flags (composable — combine freely):
 #   --bedrock              inject Bedrock keys from ~/home-lab/.secrets/bedrock.env
@@ -12,6 +12,11 @@
 #   --headless             create sandbox ready for task dispatch, no TUI attach.
 #                          Dispatch tasks with:
 #                            openshell sandbox exec -n <name> -- <agent> -p "your task"
+#   --wrapper              (for claude-code-revproxy) Set up the claude-code-openai-wrapper
+#                          as a persistent OpenAI-compatible server inside the sandbox.
+#                          Implies --bedrock --headless. The wrapper turns the full
+#                          Claude Code agent into a model that LiteLLM can reverse-proxy to.
+#                          After create, the wrapper listens on :8000 inside the sandbox.
 #
 # Examples:
 #   osbox worker-1 --bedrock
@@ -20,6 +25,7 @@
 #   osbox worker-1 --bedrock --claudeai
 #   osbox worker-1 --claudeai --headless          # autonomous worker
 #   osbox worker-1 --bedrock --claudeai --headless
+#   osbox claude-code-agent --bedrock --wrapper --headless   # revproxy target for LiteLLM
 #
 # See docs/current/todos.md for design notes (director/worker pattern, auth modes).
 set -euo pipefail
@@ -67,6 +73,7 @@ USE_CLAUDEAI=false
 USE_CLONE=false
 CLONE_SRC=""
 HEADLESS=false
+USE_WRAPPER=false
 AGENT_CMD=claude   # override for future --codex / --gemini flags
 
 usage() {
@@ -79,6 +86,7 @@ while [[ $# -gt 0 ]]; do
     --bedrock)   USE_BEDROCK=true; shift ;;
     --claudeai)  USE_CLAUDEAI=true; shift ;;
     --headless)  HEADLESS=true; shift ;;
+    --wrapper)   USE_WRAPPER=true; HEADLESS=true; USE_BEDROCK=true; shift ;;
     --clone)
       [[ $# -gt 1 ]] || die "--clone requires a source sandbox name"
       USE_CLONE=true; CLONE_SRC="$2"; shift 2 ;;
@@ -91,9 +99,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$SANDBOX_NAME" ]] \
-  || die "Usage: osbox <name> [--bedrock] [--claudeai | --clone <src>] [--headless]"
+  || die "Usage: osbox <name> [--bedrock] [--claudeai | --clone <src>] [--headless] [--wrapper]"
 ( $USE_CLAUDEAI && $USE_CLONE ) \
   && die "--claudeai and --clone are mutually exclusive (both clone auth; pick one)"
+if $USE_WRAPPER; then
+  AGENT_CMD="wrapper"  # marker for post-setup
+fi
 
 # ---- temp files — hold cloned credentials/settings, auto-cleaned on any exit --
 TMPFILE=""
@@ -262,12 +273,14 @@ $HEADLESS && TTY_FLAG=(--no-tty)
 # ---- create -------------------------------------------------------------------
 # Interactive: blocks while claude TUI runs; files pre-staged via --upload.
 # Headless: setup script exits immediately; sandbox init stays alive for exec dispatch.
+# Note: env flags placed early to satisfy openshell CLI parser in 0.0.44+ (some versions
+# are strict about option ordering before the final -- <command> separator).
 openshell sandbox create \
   --name "$SANDBOX_NAME" \
   --no-auto-providers \
+  ${ENV_FLAGS[@]+"${ENV_FLAGS[@]}"} \
   --policy "$POLICY" \
   ${TTY_FLAG[@]+"${TTY_FLAG[@]}"} \
-  ${ENV_FLAGS[@]+"${ENV_FLAGS[@]}"} \
   ${UPLOAD_FLAGS[@]+"${UPLOAD_FLAGS[@]}"} \
   "${ENTRYPOINT[@]}"
 
@@ -300,3 +313,75 @@ else
   fi
 fi
 printf '\n'
+
+# ---- wrapper post-setup (claude-code-revproxy) --------------------------------
+if $USE_WRAPPER; then
+  say "Performing wrapper-specific post-setup for claude-code-openai-wrapper (persistent server)"
+
+  # The sandbox is headless; we now exec to install the wrapper and launch the server.
+  # We use the same sandbox name. Install git/python/poetry if missing, clone the public repo,
+  # configure to skip the interactive API key prompt (use a known internal key),
+  # and launch uvicorn on 0.0.0.0:8000 in background with logs to /tmp/wrapper.log.
+  # This makes the full Claude Code agent appear as an OpenAI-compatible model
+  # that LiteLLM can reverse-proxy to from the director/OpenClaw.
+
+  WRAPPER_INTERNAL_KEY="claude-code-internal-revproxy-key-2026"
+
+  # Run the heavy setup in the sandbox (may take several minutes on first run for poetry install).
+  # We do it as a single exec so the script can report progress.
+  openshell sandbox exec -n "$SANDBOX_NAME" -- bash -c '
+    set -euo pipefail
+    echo "== Wrapper setup inside sandbox =="
+    apt-get update -qq || true
+    apt-get install -y -qq git curl python3 python3-pip python3-venv 2>/dev/null || true
+    # Poetry
+    if ! command -v poetry >/dev/null 2>&1; then
+      curl -sSL https://install.python-poetry.org | python3 - || pip3 install --user poetry
+      export PATH="$HOME/.local/bin:$PATH"
+    fi
+    # Clone or update wrapper
+    if [ ! -d /wrapper ]; then
+      git clone --depth 1 https://github.com/RichardAtCT/claude-code-openai-wrapper.git /wrapper
+    else
+      (cd /wrapper && git pull --ff-only || true)
+    fi
+    cd /wrapper
+    # Ensure no interactive prompt for client API key (we use a static one for internal LiteLLM only)
+    cat > .env <<EOF
+API_KEY=${WRAPPER_INTERNAL_KEY}
+PORT=8000
+CLAUDE_CWD=/sandbox
+CLAUDE_AUTH_METHOD=bedrock
+MAX_TIMEOUT=600000
+RATE_LIMIT_ENABLED=false
+CORS_ORIGINS=["*"]
+EOF
+    # Install deps (this can be slow the first time)
+    echo "Running poetry install (this may take 1-5 minutes)..."
+    poetry install --no-interaction --no-root 2>&1 | tail -5 || true
+    # Launch the server in background, detached from this exec
+    echo "Launching uvicorn wrapper on 0.0.0.0:8000 ..."
+    nohup poetry run uvicorn src.main:app --host 0.0.0.0 --port 8000 --log-level info > /tmp/wrapper.log 2>&1 &
+    WRAPPER_PID=$!
+    sleep 2
+    if kill -0 $WRAPPER_PID 2>/dev/null; then
+      echo "Wrapper server started (pid $WRAPPER_PID). Logs: /tmp/wrapper.log"
+    else
+      echo "WARNING: wrapper launch may have failed. Check /tmp/wrapper.log"
+      cat /tmp/wrapper.log | tail -20
+    fi
+    # Quick health hint
+    echo "To test inside sandbox: curl -H \"Authorization: Bearer ${WRAPPER_INTERNAL_KEY}\" http://localhost:8000/health"
+  ' || echo "Wrapper post-setup exec completed with warnings (check logs inside sandbox)"
+
+  printf '\n\033[1;32m=== claude-code-wrapper sandbox ready ===\033[0m\n'
+  printf '  Name: %s\n' "$SANDBOX_NAME"
+  printf '  Wrapper endpoint (internal): http://<sandbox-container>:8000/v1\n'
+  printf '  Internal client key (for LiteLLM upstream): %s\n' "$WRAPPER_INTERNAL_KEY"
+  printf '\n  To find the exact reachable address from LiteLLM:\n'
+  printf '    docker ps | grep %s\n' "$SANDBOX_NAME"
+  printf '    # Then from litellm container: curl -H "Authorization: Bearer %s" http://<full-container-name>:8000/health\n' "$WRAPPER_INTERNAL_KEY"
+  printf '\n  Next (in litellm/config.yaml): add a model pointing at the wrapper.\n'
+  printf '  Then: docker compose -f docker/compose.yml restart litellm\n'
+  printf '\n'
+fi

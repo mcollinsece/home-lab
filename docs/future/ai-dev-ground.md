@@ -2,7 +2,7 @@
 
 **Target:** Debian VM running NVIDIA OpenShell + NemoClaw + NeMo Agent Toolkit,
 hosting sandboxed coding agents (Claude Code first, then Codex and Gemini CLI)
-with per-project switching between Claude Max/Pro subscription and Bedrock.
+with two inference auth paths: Bedrock via LiteLLM, and OAuth via the claude-code-openai-wrapper.
 
 > **Current platform state:** [../current/platform.md](../current/platform.md) — hardware, IPs, running services, pending items
 
@@ -15,14 +15,16 @@ with per-project switching between Claude Max/Pro subscription and Bedrock.
 | Layer | What it is | Role in your setup |
 |---|---|---|
 | **OpenShell** ([repo](https://github.com/NVIDIA/OpenShell)) | Open-source sandbox runtime (Apache 2.0, alpha). Gateway + per-sandbox containers, deny-by-default YAML network/filesystem/process policies, credential providers, inference router. | The foundation. Runs Claude Code, Codex, and other agents unmodified. |
-| **LiteLLM** ([repo](https://github.com/BerriAI/litellm)) | OpenAI-compatible inference proxy. Single credential boundary for all model backends. | The inference hub. All agents and NemoClaw route through `inference.local` → LiteLLM → Bedrock (today). |
-| **NemoClaw** ([repo](https://github.com/NVIDIA/NemoClaw), [docs](https://docs.nvidia.com/nemoclaw/latest/)) | NVIDIA's one-command stack for running **OpenClaw** inside an OpenShell sandbox. Docker-based. | Phase 7 ✅ (infrastructure + Docker Compose + static Traefik routes in dynamic/ for openclaw-nemoclaw + dashboard + DOCKER_API_VERSION + dual-gw handling + gateway.env + claude-code on 17670 Ready; director "director" sandbox created via onboard but currently Bad Gateway / Provisioning on openclaw.lab.lan — top todo). Lab 17670 mTLS (0.0.62) vs nemoclaw 8080 (0.0.44). |
+| **LiteLLM** ([repo](https://github.com/BerriAI/litellm)) | OpenAI-compatible inference proxy. Single credential boundary for Bedrock. Also reverse-proxies the claude-code wrapper. | The inference hub. Sandboxes via `inference.local` → LiteLLM → Bedrock; OpenClaw also uses `claude-code-wrapper-local` via LiteLLM. |
+| **NemoClaw** ([repo](https://github.com/NVIDIA/NemoClaw), [docs](https://docs.nvidia.com/nemoclaw/latest/)) | NVIDIA's one-command stack for running **OpenClaw** inside an OpenShell sandbox. Docker-based. | Phase 7 ✅ fully live. Director "Ready"; `openclaw.lab.lan` live; both models (`litellm/claude-sonnet-4-6` and `litellm/claude-code-wrapper-local`) functional in the model picker. Probe service persistent. |
+| **claude-code-openai-wrapper** ([repo](https://github.com/RichardAtCT/claude-code-openai-wrapper)) | Python FastAPI app that wraps `claude_agent_sdk`, exposing the Claude Code agent as an OpenAI-compatible HTTP endpoint. | Phase 7 ✅ live. Runs inside the `openshell-claude-revproxy` sandbox (OpenShell isolation); CLAUDE_CODE_AUTH_METHOD=cli (OAuth/Pro); accessible from LiteLLM via Docker ai-net alias `claude-code-wrapper`. |
 | **NeMo Agent Toolkit** ([repo](https://github.com/NVIDIA/NeMo-Agent-Toolkit)) | Python library for orchestrating teams of agents across frameworks. | Phase 8+. The orchestration brain that coordinates sandboxed agents. |
 
 Key facts:
 
 - `openshell sandbox create -- claude` launches Claude Code in an isolated container. Same for `codex`, `opencode`, `copilot`.
-- All sandboxes point to `inference.local`; keys stay on the host in LiteLLM.
+- Sandboxes using `inference.local` hold no credentials; keys stay in LiteLLM.
+- The claude-code wrapper uses OAuth/Pro subscription — no Bedrock credentials needed in the sandbox.
 - NemoClaw runs OpenClaw itself inside an OpenShell sandbox — the director is also isolated.
 - Network egress is deny-by-default; you open it with hot-reloadable YAML policies.
 - No GPU needed — GPU only matters for local inference (Ollama/NIM/vLLM), skipped for now.
@@ -68,26 +70,36 @@ a single-user homelab. For now, Docker is the pragmatic choice.
                   │  homelab VM (.51)                             │
                   │                                               │
                   │   ┌──────────┐  :80/:443                     │
-                  │   │ Traefik  │  discovers via /var/run/docker.sock │
+                  │   │ Traefik  │  discovers via /var/run/docker.sock
                   │   └────┬─────┘  routes by label on ai-net    │
    AdGuard LXC (.53)       │                                      │
-   *.lab.lan → .51         │   ┌────────────────┐               │   ──▶  AWS Bedrock
-                           │   │ LiteLLM        │               │        (via litellm)
-                           │   │ :4000 ai-net   │               │
+   *.lab.lan → .51         │   ┌────────────────┐               │
+                           │   │ LiteLLM :4000  │               │   ──▶  AWS Bedrock
+                           │   │ (ai-net)       │               │        (claude-sonnet-4-6)
                            │   └───────┬────────┘               │
                            │           │                          │
-                           │   OpenShell lab gateway :17670 (mTLS) │
-                           │     inference.local → LiteLLM      │
-                           │   ┌────────────┐  ┌────────────┐   │
-                           │   │ claude-code│  │ Portainer  │   │
-                           │   │ sandbox    │  │ (Docker UI)│   │
-                           │   │ (Ready)    │  └────────────┘   │
-                           │   └────────────┘                    │
-                           │   NemoClaw (own gw :8080 + 10.89)   │
-                           │   ┌────────────┐                    │
-                           │   │ "director" │ (OpenClaw; Bad GW / provisioning; see todos)
-                           │   └────────────┘                    │
-                           │   ai-net (Docker bridge)            │
+                           │   OpenShell lab gateway :17670       │
+                           │     inference.local → LiteLLM       │
+                           │   ┌────────────┐                     │
+                           │   │ claude-code│                     │
+                           │   │ sandbox    │  (interactive;      │
+                           │   │ (Ready)    │   inference.local)  │
+                           │   ├────────────┤                     │
+                           │   │ claude-    │  CLAUDE_CODE_AUTH   │  ──▶  api.anthropic.com
+                           │   │ revproxy   │  _METHOD=cli (OAuth)│       (Pro subscription)
+                           │   │ sandbox    │  ai-net alias:      │
+                           │   │ :8000      │  claude-code-wrapper│
+                           │   └────────────┘                     │
+                           │   NemoClaw (own gw :8080)            │
+                           │   ┌────────────┐                     │
+                           │   │ "director" │ OpenClaw ✅ live    │
+                           │   │ (OpenClaw) │ models:             │
+                           │   │ ai-net     │  litellm/claude-    │
+                           │   │ alias:     │  sonnet-4-6         │
+                           │   │ openclaw-  │  litellm/claude-    │
+                           │   │ director   │  code-wrapper-local │
+                           │   └────────────┘                     │
+                           │   ai-net (Docker bridge 172.18.x)    │
                            └──────────────────────────────────────┘
 ```
 
@@ -101,7 +113,7 @@ a single-user homelab. For now, Docker is the pragmatic choice.
 | Images | build locally → push to local registry `:5000` | same registry → cluster pulls from it |
 | Config | env files | ConfigMaps |
 | Secrets | untracked `.secrets/*.env` → `env_file:` in Compose | k8s Secrets |
-| Inference | remote APIs (Bedrock via LiteLLM) | vLLM cluster (GPU nodes) + remote fallback |
+| Inference | remote APIs (Bedrock via LiteLLM, OAuth via wrapper) | vLLM cluster (GPU nodes) + remote fallback |
 | Networking | `ai-net` Docker bridge | CNI (Flannel/Cilium) + Services |
 | Exposure | Traefik labels → `<name>.lab.lan` | Ingress (Traefik/nginx) |
 
@@ -111,34 +123,43 @@ a single-user homelab. For now, Docker is the pragmatic choice.
 
 ```
 home-lab/
-├── README.md                       ✅ repo index + quick-add-service guide
-├── .gitignore                      ✅ **/*.env (except committed examples + gateway.env), *-key.pem
+├── README.md                              ✅ repo index + quick-add-service guide
+├── .gitignore                             ✅ **/*.env (except committed examples), *-key.pem
 ├── docs/
 │   ├── current/
-│   │   ├── platform.md             ✅ hardware, IPs, running services — current state
-│   │   ├── todos.md                ✅ immediate next steps + phase punchlist
-│   │   └── litellm-proxy.md        ✅ LiteLLM architecture + operations
-│   └── future/
-│       └── ai-dev-ground.md        ✅ this file — AI stack plan
+│   │   ├── platform.md                   ✅ hardware, IPs, running services — current state
+│   │   ├── todos.md                      ✅ immediate next steps + phase punchlist
+│   │   └── litellm-proxy.md              ✅ LiteLLM architecture + operations
+│   ├── future/
+│   │   └── ai-dev-ground.md              ✅ this file — AI stack plan
+│   └── diagrams/
+│       ├── claude-code-agent-sandbox-flow.md   ✅ deployed two-direction architecture
+│       └── claude-code-wrapper-data-flow.md    ✅ wrapper data flow detail
 ├── bootstrap/
-│   ├── setup-host.sh               ✅ idempotent host rebuild (Docker, OpenShell, tools)
-│   ├── init-secrets.sh             ✅ populate .secrets/*.env from password manager
-│   ├── osbox                       ✅ OpenShell sandbox launcher helper
-│   └── TROUBLESHOOTING.md          ✅ failure modes + fixes
+│   ├── setup-host.sh                     ✅ idempotent host rebuild (Docker, OpenShell, tools)
+│   ├── init-secrets.sh                   ✅ populate .secrets/*.env from password manager
+│   ├── nemoclaw-director-probe.sh        ✅ probe: CORS, provider, shim, ai-net, openclaw start
+│   ├── setup-claude-revproxy.sh          ✅ start wrapper in openshell-claude-revproxy sandbox
+│   ├── sync-claude-credentials.sh        ✅ copy host ~/.claude to sandbox /root/.claude
+│   ├── osbox                             ✅ OpenShell sandbox launcher helper
+│   └── TROUBLESHOOTING.md               ✅ failure modes + fixes
 ├── docker/
-│   └── compose.yml                 ✅ Traefik, Portainer, Registry, LiteLLM services
-├── traefik/                        ✅ static config + TLS config + certs + README
+│   └── compose.yml                       ✅ Traefik, Portainer, Registry, LiteLLM
+├── traefik/                              ✅ static config + TLS config + certs + README
+│   └── dynamic/
+│       ├── openclaw-nemoclaw.yml         ✅ static route: openclaw.lab.lan → openclaw-director:18789
+│       └── traefik-dashboard.yml         ✅ static route: traefik dashboard
 ├── litellm/
-│   ├── config.yaml                 ✅ model routing (Bedrock today; future providers stubbed)
-│   ├── litellm.env.example         ✅ non-secret config template
-│   └── litellm.env                 gitignored; copy from example
-├── openshell/                      ✅ agent sandbox runtime
-│   ├── gateway.env                 ✅ gateway driver=docker + bind (symlinked into ~/.config)
-│   ├── policies/claude-code.yaml   ✅ Claude Code network policy (Anthropic + Bedrock egress)
-│   └── README.md                   ✅ reproduce + sandbox lifecycle + inference.local
+│   ├── config.yaml                       ✅ model routing (Bedrock + claude-code wrapper; future providers stubbed)
+│   ├── litellm.env.example              ✅ non-secret config template
+│   └── litellm.env                      gitignored; copy from example
+├── openshell/                            ✅ agent sandbox runtime
+│   ├── gateway.env                       ✅ gateway driver=docker + bind (symlinked into ~/.config)
+│   ├── policies/claude-code.yaml        ✅ Claude Code network policy (Anthropic + api.anthropic.com egress)
+│   └── README.md                        ✅ reproduce + sandbox lifecycle + inference.local
 ├── projects/
-│   └── _template/                  ✅ Docker Compose template for new services
-└── k8s/                            ☐ (future) manifests the Compose services graduate into
+│   └── _template/                       ✅ Docker Compose template for new services
+└── k8s/                                 ☐ (future) manifests the Compose services graduate into
 ```
 
 ---
@@ -155,23 +176,10 @@ Built 2026-06-12 and reproducible from a clean checkout via
 
 ## Phase 3 — Dual auth: Max/Pro subscription ↔ Bedrock per project ✅ DONE (2026-06-12)
 
-Claude Code picks its backend per project via settings precedence. Subscription OAuth
-is the default; Bedrock is opt-in via `.claude/settings.json` env block.
-
-```jsonc
-// <bedrock-project>/.claude/settings.json — opt THIS project into Bedrock
-{
-  "env": {
-    "CLAUDE_CODE_USE_BEDROCK": "1",
-    "AWS_REGION": "us-east-1",
-    "ANTHROPIC_MODEL": "us.anthropic.claude-sonnet-4-6"
-  }
-}
-```
-
-> **Note (post Phase 4.5):** New sandboxes should use `ANTHROPIC_BASE_URL=https://inference.local`
-> instead of raw AWS keys. The per-project Bedrock switching pattern still works inside
-> sandboxes that have direct AWS key access, but the preferred path is inference.local.
+Claude Code picks its backend per project via settings precedence. The preferred pattern
+for new sandboxes is `ANTHROPIC_BASE_URL=https://inference.local` → LiteLLM → Bedrock.
+The per-project Bedrock switching pattern (`.claude/settings.json` env block) still works
+for sandboxes with direct AWS key access, but `inference.local` is the preferred path.
 
 ## Phase 4 — OpenClaw director ✅ DONE (migrated to NemoClaw in Phase 7)
 
@@ -191,7 +199,7 @@ confirmed end-to-end. Architecture and operations in
 
 - **Bedrock model ID:** `us.anthropic.claude-sonnet-4-6` (no date suffix — verified)
 - **max_tokens cap:** 64,000 — prevents OpenClaw's 200K requests from hitting Bedrock's 128K limit
-- **Single credential boundary:** all inference routes through LiteLLM; no sandbox holds raw keys
+- **Single Bedrock credential boundary:** all Bedrock inference routes through LiteLLM; no sandbox holds AWS keys
 
 ## Phase 5 — Codex CLI sandbox
 
@@ -211,24 +219,32 @@ Add Google Gemini CLI as a sandboxed agent.
 - **`--gemini` flag for `osbox`** — sandboxes use `GOOGLE_GENAI_BASE_URL=https://inference.local`.
 - **Verify** `osbox gemini-1 --gemini --headless`.
 
-## Phase 7 — NemoClaw + Docker migration ✅ DONE (2026-06-13; director Bad Gateway active item)
+## Phase 7 — NemoClaw + Docker migration + claude-code-wrapper-local ✅ DONE (2026-06-13/14)
 
-**Infrastructure migration complete.** All services migrated from rootless Podman Quadlets
-to Docker Engine + Docker Compose (with DOCKER_API_VERSION=1.41). OpenShell gateway driver = docker.
-Static file-provider routes added in `traefik/dynamic/` (openclaw-nemoclaw.yml + traefik-dashboard.yml)
-to work around persistent Docker provider "client version 1.24 too old" skew. gateway.env kept simple;
-symlink restore required after nemoclaw. Lab claude-code recreated on explicit 17670 gateway and is Ready.
+**Fully live.** All services migrated from rootless Podman Quadlets to Docker Engine + Docker Compose.
+OpenShell gateway driver = docker. Static file-provider routes in `traefik/dynamic/` work around
+the Docker provider "client version 1.24 too old" skew. gateway.env kept simple; symlink restore
+required after nemoclaw onboard.
 
-**Current remaining in this phase:** NemoClaw director ("director" sandbox) is stuck in provisioning → openclaw.lab.lan returns Bad Gateway (user-reported at session end). Top item in [docs/current/todos.md](../current/todos.md): `nemoclaw director status`, `rebuild --yes`, tail the nemoclaw openshell-gateway.log, ss 18789, route curl, 10.89 alias context. Dual gateways coexist (lab 17670 mTLS 0.0.62 vs nemoclaw 8080 0.0.44).
+**What's deployed:**
 
-NemoClaw is NVIDIA's managed stack running OpenClaw inside an OpenShell sandbox:
+- NemoClaw director ("director" sandbox) is `Ready`; `openclaw.lab.lan` returns 200 and the dashboard loads.
+- Routing: Traefik → `openclaw-director:18789` (Docker ai-net alias). No SSH tunnel or socat.
+- Probe service (`nemoclaw-director-control-ui`) handles: CORS patch, litellm provider rename,
+  claude-code-wrapper-local model add, pass-through shim, ai-net connect, openclaw gateway start.
+- OpenClaw model picker: `litellm/claude-sonnet-4-6` (→ Bedrock) and `litellm/claude-code-wrapper-local` (→ wrapper).
+- **claude-code-wrapper-local:** `claude-code-openai-wrapper` running in `openshell-claude-revproxy`
+  OpenShell sandbox; `CLAUDE_CODE_AUTH_METHOD=cli` (OAuth/Pro); connected to ai-net as `claude-code-wrapper`;
+  LiteLLM routes three aliases (`claude-code-sonnet`, `claude-code/sonnet`, `claude-code-wrapper-local`) to it.
+  End-to-end verified: OpenClaw → LiteLLM → wrapper → Claude Code → Anthropic.
+
 ```bash
 curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash
 # During wizard: OpenAI-compatible → LiteLLM key → http://localhost:4000/v1 → claude-sonnet-4-6
-# (Onboard run in session; director create succeeded but client waits for Ready.)
+systemctl --user enable --now nemoclaw-director-control-ui   # probe service
+bootstrap/setup-claude-revproxy.sh                           # wrapper sandbox
+bootstrap/sync-claude-credentials.sh                         # OAuth credentials
 ```
-
-Local: `http://127.0.0.1:18789` (or via nemoclaw connect). Public: `https://openclaw.lab.lan` (static route in traefik/dynamic/openclaw-nemoclaw.yml, file provider, hot-reload, no Traefik restart). See [traefik/README.md](../../traefik/README.md) and TROUBLESHOOTING.md.
 
 ## Phase 8 — Podman re-evaluation + NeMo Agent Toolkit
 
@@ -270,8 +286,10 @@ labels:
   # - traefik.http.services.grafana.loadbalancer.server.port=3000
 ```
 
-See [traefik/README.md](../../traefik/README.md) for the full label reference and
-how to add static routes for NemoClaw-managed containers.
+NemoClaw-managed containers (like the director) aren't discovered by Traefik's Docker provider
+due to API version skew. Use static file routes in `traefik/dynamic/` instead — they hot-reload.
+
+See [traefik/README.md](../../traefik/README.md) for the full label reference.
 
 ---
 
@@ -321,7 +339,7 @@ When you add a second/third Optiplex:
 - [x] Phase 3: Subscription ↔ Bedrock per-project switching
 - [x] Phase 4: OpenClaw director (now managed by NemoClaw — Phase 7)
 - [x] Phase 4.5: LiteLLM proxy (Docker Compose, Bedrock routing verified)
-- [x] Phase 7: Docker + NemoClaw migration (infrastructure + static routes + claude-code Ready; director provisioning/Bad Gateway + onboard complete — see todos for active troubleshoot)
+- [x] Phase 7: Docker + NemoClaw migration — **fully live** (director Ready, openclaw.lab.lan, claude-code-wrapper-local working end-to-end)
 - [ ] Phase 5: Codex CLI sandbox
 - [ ] Phase 6: Gemini CLI sandbox
 - [ ] Phase 8: Podman re-evaluation + NeMo Agent Toolkit orchestration
@@ -335,7 +353,8 @@ See [docs/current/todos.md](../current/todos.md) for the immediate next-step seq
 ## Caveats
 
 - **Everything NVIDIA here is alpha** (OpenShell and NemoClaw both carry "do not use in production" banners). Pin versions where you can (`OPENSHELL_VERSION`).
-- Subscription (Max/Pro) in long-running loops can hit rate limits — Bedrock via LiteLLM is the better default for unattended/batch work.
+- The claude-code-openai-wrapper requires an active Claude Pro/Max subscription. Run `bootstrap/sync-claude-credentials.sh` after `claude auth login` on the host.
+- Subscription auth in long-running agentic loops can hit rate limits — Bedrock via LiteLLM is the better default for unattended/batch work.
 - Verify current Bedrock model IDs in the [Claude Code Bedrock docs](https://code.claude.com/docs/en/amazon-bedrock) when updating. Claude 4.x IDs have no date suffix; older models do.
 - Pin image tags — no `:latest`. Secrets out of git.
 
@@ -348,4 +367,5 @@ See [docs/current/todos.md](../current/todos.md) for the immediate next-step seq
 - [NeMo Agent Toolkit repo](https://github.com/NVIDIA/NeMo-Agent-Toolkit)
 - [LiteLLM repo](https://github.com/BerriAI/litellm)
 - [OpenClaw repo](https://github.com/openclaw/openclaw) · [OpenClaw docs](https://docs.openclaw.ai)
+- [claude-code-openai-wrapper](https://github.com/RichardAtCT/claude-code-openai-wrapper)
 - [Claude Code on Amazon Bedrock](https://code.claude.com/docs/en/amazon-bedrock)
