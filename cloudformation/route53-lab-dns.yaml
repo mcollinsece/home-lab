@@ -1,0 +1,141 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  home-lab cloud DNS — Route53 PRIVATE hosted zone for *.lab.lan, the cloud
+  replacement for the on-prem AdGuard wildcard (*.lab.lan -> homelab host).
+  Associates the zone with the workload VPC and points a wildcard A record at the
+  EC2 instance's private IP. Preserves the existing mkcert *.lab.lan TLS cert.
+  See docs/cloud/route53-dns.md.
+
+Parameters:
+  ZoneName:
+    Type: String
+    Default: lab.lan
+    Description: Private DNS zone name (keep lab.lan so the mkcert *.lab.lan cert stays valid).
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-03c90cc1969db9c8f
+    Description: VPC to associate the private hosted zone with (workload VPC, 10.0.0.0/16).
+
+  VpcRegion:
+    Type: String
+    Default: us-east-1
+    Description: Region of the associated VPC.
+
+  TargetPrivateIp:
+    Type: String
+    Default: 10.0.5.55
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}$'
+    Description: >-
+      Private IP that *.lab.lan resolves to (the homelab EC2 instance). If the
+      instance ever gets a new private IP, update this and redeploy.
+
+  RecordTtl:
+    Type: Number
+    Default: 60
+    MinValue: 0
+    MaxValue: 86400
+    Description: TTL (seconds) for the DNS records.
+
+  CreateExplicitRecords:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      Also create explicit A records for the known services (openclaw, litellm,
+      portainer, traefik, registry) in addition to the wildcard. The wildcard
+      already covers them; set true only if you prefer explicit entries.
+
+Conditions:
+  WantExplicitRecords: !Equals [!Ref CreateExplicitRecords, "true"]
+
+Resources:
+  LabPrivateZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Ref ZoneName
+      HostedZoneConfig:
+        Comment: home-lab cloud private DNS (replaces AdGuard *.lab.lan wildcard)
+      # Presence of VPCs makes this a PRIVATE hosted zone.
+      VPCs:
+        - VPCId: !Ref VpcId
+          VPCRegion: !Ref VpcRegion
+
+  WildcardRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref LabPrivateZone
+      Name: !Sub "*.${ZoneName}"
+      Type: A
+      TTL: !Ref RecordTtl
+      ResourceRecords:
+        - !Ref TargetPrivateIp
+
+  # Optional explicit records (wildcard already covers these) ---------------------
+  OpenclawRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: WantExplicitRecords
+    Properties:
+      HostedZoneId: !Ref LabPrivateZone
+      Name: !Sub "openclaw.${ZoneName}"
+      Type: A
+      TTL: !Ref RecordTtl
+      ResourceRecords: [!Ref TargetPrivateIp]
+
+  LitellmRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: WantExplicitRecords
+    Properties:
+      HostedZoneId: !Ref LabPrivateZone
+      Name: !Sub "litellm.${ZoneName}"
+      Type: A
+      TTL: !Ref RecordTtl
+      ResourceRecords: [!Ref TargetPrivateIp]
+
+  PortainerRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: WantExplicitRecords
+    Properties:
+      HostedZoneId: !Ref LabPrivateZone
+      Name: !Sub "portainer.${ZoneName}"
+      Type: A
+      TTL: !Ref RecordTtl
+      ResourceRecords: [!Ref TargetPrivateIp]
+
+  TraefikRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: WantExplicitRecords
+    Properties:
+      HostedZoneId: !Ref LabPrivateZone
+      Name: !Sub "traefik.${ZoneName}"
+      Type: A
+      TTL: !Ref RecordTtl
+      ResourceRecords: [!Ref TargetPrivateIp]
+
+  RegistryRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: WantExplicitRecords
+    Properties:
+      HostedZoneId: !Ref LabPrivateZone
+      Name: !Sub "registry.${ZoneName}"
+      Type: A
+      TTL: !Ref RecordTtl
+      ResourceRecords: [!Ref TargetPrivateIp]
+
+Outputs:
+  HostedZoneId:
+    Description: Route53 private hosted zone ID
+    Value: !Ref LabPrivateZone
+
+  ZoneName:
+    Description: Zone name
+    Value: !Ref ZoneName
+
+  WildcardTarget:
+    Description: IP that *.lab.lan resolves to
+    Value: !Ref TargetPrivateIp
+
+  TestFromVpc:
+    Description: Resolution test to run from a VPC/VPN client
+    Value: !Sub "dig +short openclaw.${ZoneName}  # expect ${TargetPrivateIp}"

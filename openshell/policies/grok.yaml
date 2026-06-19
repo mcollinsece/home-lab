@@ -1,0 +1,39 @@
+# Grok wrapper sandbox policy
+#
+# Network policy for the grok-openai-wrapper running inside an OpenShell sandbox.
+# The wrapper accepts OpenAI-compatible requests from LiteLLM and forwards them
+# to xAI's API (api.x.ai) using a Grok subscription.
+#
+# Apply at create:   openshell sandbox create --name grok-wrapper --policy openshell/policies/grok.yaml
+# Hot-reload:        openshell policy set grok-wrapper --policy openshell/policies/grok.yaml --wait
+
+version: 1
+
+# Static fields required for policy replacement
+filesystem_policy:
+  include_workdir: true
+  read_only: [/usr, /lib, /proc, /dev/urandom, /app, /etc, /var/log]
+  read_write: [/sandbox, /tmp, /dev/null]
+
+landlock:
+  compatibility: best_effort
+
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+
+network_policies:
+  xai:
+    name: xai-grok
+    endpoints:
+      # xAI API endpoint for Grok inference
+      - { host: api.x.ai, port: 443 }
+      # Device-code auth flow (if needed for future manual auth)
+      - { host: x.ai, port: 443 }
+    binaries:
+      # Python for FastAPI/uvicorn wrapper
+      - { path: /usr/bin/python3 }
+      - { path: /usr/bin/python }
+      - { path: /usr/local/bin/python3 }
+      - { path: /sandbox/.uv/python/cpython-3.14.3-linux-x86_64-gnu/bin/python3 }
+      - { path: /sandbox/.uv/python/cpython-3.14.3-linux-x86_64-gnu/bin/uvicorn }

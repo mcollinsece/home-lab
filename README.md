@@ -23,18 +23,20 @@ runs the always-on OpenClaw director inside its own OpenShell sandbox — proper
 and network isolation for the orchestration layer itself, not just the workers.
 
 **[LiteLLM](https://github.com/BerriAI/litellm)** is the single inference credential
-boundary. It routes Bedrock-backed models to AWS and reverse-proxies the Claude Code
-agent wrapper for agentic tool-use sessions. No sandbox ever holds a raw model key.
+boundary. It routes Bedrock-backed models to AWS and reverse-proxies agent wrappers
+(Claude Code, Grok Build) for agentic tool-use sessions. No sandbox ever holds a raw model key.
 
 ### What's actually unique here
 
-- **Two auth paths, zero credential leakage.** Bedrock calls (claude-sonnet-4-6) go
-  through LiteLLM only. Claude Code agent sessions (the wrapper) use the Pro OAuth
-  subscription from inside the sandbox. Neither path exposes credentials to user code.
-- **Agentic inference as a first-class model.** The Claude Code agent runs inside an
-  OpenShell sandbox and is registered in LiteLLM as `claude-code-wrapper-local`. OpenClaw
-  can invoke it exactly like any other model — tools, long sessions, file work, all inside
-  the isolated sandbox.
+- **Three auth paths, zero credential leakage.** Bedrock calls (claude-sonnet-4-6) go
+  through LiteLLM only. Claude Code and Grok Build agent sessions use OAuth subscriptions
+  from inside isolated sandboxes. Neither path exposes credentials to user code.
+- **Agentic inference as first-class models.** Both Claude Code and Grok Build agents run
+  inside OpenShell sandboxes and are registered in LiteLLM as models. OpenClaw can invoke
+  them exactly like any other model — tools, long sessions, file work, all inside isolated sandboxes.
+- **CLI-to-API pattern.** OAuth-authenticated agent CLIs (claude, grok) are wrapped as
+  OpenAI-compatible HTTP endpoints, making subscription-based agents accessible via standard
+  LLM APIs without exposing credentials.
 - **Built to migrate, on purpose.** This OptiPlex is a *transitional* dev host.
   Docker Compose services have a direct path to k8s manifests; OpenShell sandboxes
   map to k8s Pods; the local registry is already cluster-ready.
@@ -47,13 +49,14 @@ agent wrapper for agentic tool-use sessions. No sandbox ever holds a raw model k
 | Docker Compose services (Traefik, Portainer, Registry, LiteLLM) | ✅ live |
 | LiteLLM → Amazon Bedrock (`claude-sonnet-4-6`) | ✅ live |
 | OpenShell lab gateway — Docker driver, deny-by-default sandboxes | ✅ live |
-| **NemoClaw director** (OpenClaw in its own OpenShell sandbox) | ✅ live — `openclaw.lab.lan`; `litellm/claude-sonnet-4-6` + `litellm/claude-code-wrapper-local` models; Traefik → Docker alias; probe service persistent |
+| **NemoClaw director** (OpenClaw in its own OpenShell sandbox) | ✅ live — `openclaw.lab.lan`; three models: `claude-sonnet-4-6`, `claude-code-wrapper-local`, `grok-wrapper-local`; Traefik → Docker alias; probe service persistent |
 | **Claude Code agent wrapper** (`claude-code-wrapper-local`) | ✅ live — OAuth/Pro subscription; inside `openshell-claude-revproxy` sandbox; LiteLLM reverse-proxies it as an agentic model |
+| **Grok agent wrapper** (`grok-wrapper-local`) | ✅ live — OAuth/Grok subscription; inside `openshell-grok-wrapper` sandbox; uses Grok Build CLI; LiteLLM reverse-proxies it as an agentic model |
 | Claude Code sandbox (lab gateway, interactive) | ✅ live — `inference.local` → LiteLLM → Bedrock |
 | Codex CLI sandbox | ⬜ roadmap (Phase 5) |
 | Gemini CLI sandbox | ⬜ roadmap (Phase 6) |
 | Podman runtime re-evaluation | ⬜ roadmap (Phase 8) |
-| Alternative providers (OpenAI, Grok, Gemini, OpenRouter) | ⬜ roadmap (Phase 9) |
+| Alternative providers (OpenAI, Gemini, OpenRouter) | ⬜ roadmap (Phase 9) |
 | k3s + vLLM on a second node | ⬜ roadmap |
 
 Full vision, phases, and the k8s roadmap: **[docs/future/ai-dev-ground.md](docs/future/ai-dev-ground.md)**.
@@ -77,12 +80,14 @@ Internet
     │           ├── Registry (Docker Compose, ai-net) — registry.lab.lan :5000
     │           ├── OpenShell lab gateway (systemd --user) — :17670 mTLS, Docker driver
     │           │     inference.local → LiteLLM → Bedrock
-    │           │     └── claude-code sandbox — interactive agent, outbound via inference.local
-    │           ├── NemoClaw (gateway :8080, Docker driver)
-    │           │     └── director sandbox (OpenClaw) — on ai-net → openclaw.lab.lan
-    │           └── openshell-claude-revproxy sandbox (OpenShell, on ai-net)
-    │                 └── claude-code-openai-wrapper — OAuth/Pro → api.anthropic.com
-    │                       ▲ LiteLLM routes claude-code-wrapper-local here
+    │           │     ├── claude-code sandbox — interactive agent, outbound via inference.local
+    │           │     ├── openshell-claude-revproxy (on ai-net as claude-code-wrapper)
+    │           │     │     └── claude-code-openai-wrapper — OAuth/Pro → api.anthropic.com
+    │           │     └── openshell-grok-wrapper (on ai-net as grok-wrapper)
+    │           │           └── grok-openai-wrapper — OAuth/Grok → xAI
+    │           └── NemoClaw (gateway :8080, Docker driver)
+    │                 └── director sandbox (OpenClaw) — on ai-net → openclaw.lab.lan
+    │                       models: claude-sonnet-4-6, claude-code-wrapper-local, grok-wrapper-local
     └── ... other devices via AdGuard DHCP
 ```
 
@@ -134,6 +139,15 @@ Cert expires **2028-09-13**; CA valid until **2036-06-13**.
 | [docs/current/platform.md](docs/current/platform.md) | Hardware, IPs, running services, sandbox architecture — single source of truth |
 | [docs/current/todos.md](docs/current/todos.md) | Active work items and roadmap punchlist |
 | [docs/current/litellm-proxy.md](docs/current/litellm-proxy.md) | LiteLLM architecture, model routing, operations |
+
+**Cloud (AWS EC2)**
+
+| Doc | What it covers |
+|---|---|
+| [docs/cloud/aws-ec2-provisioning.md](docs/cloud/aws-ec2-provisioning.md) | Provision the instance — AMI, networking, IAM role, Bedrock (IMDS hop limit + endpoint SG) |
+| [docs/cloud/aws-ec2-deployment.md](docs/cloud/aws-ec2-deployment.md) | Deploy the stack — `bootstrap/deploy-ec2.sh` (automated) + manual walkthrough + lessons learned |
+| [docs/cloud/route53-dns.md](docs/cloud/route53-dns.md) | DNS via a Route53 private zone (`*.lab.lan`); CFT in `cloudformation/` |
+| [docs/cloud/reboot-autostart.md](docs/cloud/reboot-autostart.md) | What survives a reboot and the autostart units that close the gaps |
 
 **Future plans**
 

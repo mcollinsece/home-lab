@@ -9,4 +9,6 @@ http:
     openclaw:
       loadBalancer:
         servers:
-          - url: "http://openclaw-director:18789"
+          # NemoClaw 0.0.55 serves the dashboard via an SSH tunnel on the host
+          # loopback; setup-openclaw-relay.sh bridges it to the ai-net gateway.
+          - url: "http://172.19.0.1:18790"

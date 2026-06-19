@@ -1,8 +1,8 @@
 # Homelab Agentic AI Stack — Setup Plan
 
 **Target:** Debian VM running NVIDIA OpenShell + NemoClaw + NeMo Agent Toolkit,
-hosting sandboxed coding agents (Claude Code first, then Codex and Gemini CLI)
-with two inference auth paths: Bedrock via LiteLLM, and OAuth via the claude-code-openai-wrapper.
+hosting sandboxed coding agents (Claude Code and Grok Build live; Codex and Gemini CLI planned)
+with three inference auth paths: Bedrock via LiteLLM, Claude OAuth via claude-code-openai-wrapper, and Grok OAuth via grok-openai-wrapper.
 
 > **Current platform state:** [../current/platform.md](../current/platform.md) — hardware, IPs, running services, pending items
 
@@ -16,8 +16,9 @@ with two inference auth paths: Bedrock via LiteLLM, and OAuth via the claude-cod
 |---|---|---|
 | **OpenShell** ([repo](https://github.com/NVIDIA/OpenShell)) | Open-source sandbox runtime (Apache 2.0, alpha). Gateway + per-sandbox containers, deny-by-default YAML network/filesystem/process policies, credential providers, inference router. | The foundation. Runs Claude Code, Codex, and other agents unmodified. |
 | **LiteLLM** ([repo](https://github.com/BerriAI/litellm)) | OpenAI-compatible inference proxy. Single credential boundary for Bedrock. Also reverse-proxies the claude-code wrapper. | The inference hub. Sandboxes via `inference.local` → LiteLLM → Bedrock; OpenClaw also uses `claude-code-wrapper-local` via LiteLLM. |
-| **NemoClaw** ([repo](https://github.com/NVIDIA/NemoClaw), [docs](https://docs.nvidia.com/nemoclaw/latest/)) | NVIDIA's one-command stack for running **OpenClaw** inside an OpenShell sandbox. Docker-based. | Phase 7 ✅ fully live. Director "Ready"; `openclaw.lab.lan` live; both models (`litellm/claude-sonnet-4-6` and `litellm/claude-code-wrapper-local`) functional in the model picker. Probe service persistent. |
-| **claude-code-openai-wrapper** ([repo](https://github.com/RichardAtCT/claude-code-openai-wrapper)) | Python FastAPI app that wraps `claude_agent_sdk`, exposing the Claude Code agent as an OpenAI-compatible HTTP endpoint. | Phase 7 ✅ live. Runs inside the `openshell-claude-revproxy` sandbox (OpenShell isolation); CLAUDE_CODE_AUTH_METHOD=cli (OAuth/Pro); accessible from LiteLLM via Docker ai-net alias `claude-code-wrapper`. |
+| **NemoClaw** ([repo](https://github.com/NVIDIA/NemoClaw), [docs](https://docs.nvidia.com/nemoclaw/latest/)) | NVIDIA's one-command stack for running **OpenClaw** inside an OpenShell sandbox. Docker-based. | Phase 7 ✅ fully live. Director "Ready"; `openclaw.lab.lan` live; three models functional in picker: `litellm/claude-sonnet-4-6`, `litellm/claude-code-wrapper-local`, `litellm/grok-wrapper-local`. Probe service persistent. |
+| **claude-code-openai-wrapper** ([repo](https://github.com/RichardAtCT/claude-code-openai-wrapper)) | Python FastAPI app that wraps `claude_agent_sdk`, exposing the Claude Code agent as an OpenAI-compatible HTTP endpoint. | Phase 7 ✅ live. Runs inside `openshell-claude-revproxy` sandbox; spawns `claude` CLI via OAuth/Pro; accessible from LiteLLM via Docker ai-net alias `claude-code-wrapper:8000`. |
+| **grok-openai-wrapper** (custom) | Python FastAPI app that wraps Grok Build CLI, exposing it as an OpenAI-compatible HTTP endpoint. | ✅ live (2026-06-15). Runs inside `openshell-grok-wrapper` sandbox; spawns `grok --single` via OAuth/Grok subscription; accessible from LiteLLM via Docker ai-net alias `grok-wrapper:8001`. |
 | **NeMo Agent Toolkit** ([repo](https://github.com/NVIDIA/NeMo-Agent-Toolkit)) | Python library for orchestrating teams of agents across frameworks. | Phase 8+. The orchestration brain that coordinates sandboxed agents. |
 
 Key facts:
@@ -340,10 +341,11 @@ When you add a second/third Optiplex:
 - [x] Phase 4: OpenClaw director (now managed by NemoClaw — Phase 7)
 - [x] Phase 4.5: LiteLLM proxy (Docker Compose, Bedrock routing verified)
 - [x] Phase 7: Docker + NemoClaw migration — **fully live** (director Ready, openclaw.lab.lan, claude-code-wrapper-local working end-to-end)
+- [x] **Grok wrapper** (2026-06-15): grok-wrapper-local live — spawns Grok Build CLI with OAuth, same pattern as claude-code-wrapper
 - [ ] Phase 5: Codex CLI sandbox
 - [ ] Phase 6: Gemini CLI sandbox
 - [ ] Phase 8: Podman re-evaluation + NeMo Agent Toolkit orchestration
-- [ ] Phase 9: Alternative providers (OpenAI, Grok, Gemini, OpenRouter)
+- [ ] Phase 9: Alternative providers (OpenAI, Gemini, OpenRouter)
 - [ ] k3s + vLLM on a second node
 
 See [docs/current/todos.md](../current/todos.md) for the immediate next-step sequence.
