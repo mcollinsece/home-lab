@@ -29,6 +29,40 @@ sandboxes, NemoClaw director, agent wrappers) to a provisioned EC2 instance.
 
 ---
 
+## Automated deployment (recommended)
+
+Everything below is encoded in a single idempotent orchestrator,
+[`bootstrap/deploy-ec2.sh`](../../bootstrap/deploy-ec2.sh), which incorporates all
+the lessons from the first EC2 bring-up (see [Lessons learned](#lessons-learned-2026-06-ec2-bring-up)).
+
+```bash
+# One-time, on the host first (interactive OAuth — cannot be scripted):
+claude login
+grok login            # skip if you pass --skip-grok
+
+# Then from the repo:
+git clone <repo> ~/home-lab && cd ~/home-lab
+./bootstrap/deploy-ec2.sh            # Bedrock via instance role by default
+#   --static-keys   use a scoped IAM user's keys instead of the instance role
+#   --skip-grok     deploy without the Grok wrapper
+#   --region us-east-1
+```
+
+It runs, in order: `setup-host.sh` → `init-secrets --instance-role` → docker compose
+→ OpenShell inference → Claude wrapper → Grok wrapper → NemoClaw director →
+OpenClaw relay (`openclaw.lab.lan`) → reboot-autostart units → verification.
+
+**Prereqs it cannot do for you:** `claude login` / `grok login` on the host; and on
+the AWS side, **IMDS hop limit 2** + the **bedrock-runtime VPC-endpoint SG open on
+443** (see [aws-ec2-provisioning.md](aws-ec2-provisioning.md#bedrock-via-the-instance-role-recommended--no-static-keys)).
+After it finishes: install the CA cert on clients and set up DNS
+([route53-dns.md](route53-dns.md)).
+
+The manual, step-by-step walkthrough below explains what each phase does and is the
+reference when something needs hand-holding.
+
+---
+
 ## Overview
 
 ### What You're Deploying
@@ -54,9 +88,9 @@ EC2 Instance
 - **System prep:** 5 minutes
 - **setup-host.sh:** 10-15 minutes (downloads Docker, Node, OpenShell)
 - **Docker services:** 2 minutes
-- **NemoClaw:** 5 minutes (interactive onboarding)
-- **Wrappers:** 5 minutes each
-- **Total:** ~35-45 minutes
+- **NemoClaw:** ~8-12 minutes (non-interactive onboard; the director sandbox image build is the slow part)
+- **Wrappers:** ~5 minutes each (first sandbox create pulls the ~5GB base image)
+- **Total:** ~40-55 minutes (mostly image pulls/builds; `deploy-ec2.sh` runs it unattended)
 
 ---
 
@@ -380,76 +414,69 @@ Model: claude-sonnet-4-6
 
 ---
 
-## Install NemoClaw
+## Install NemoClaw + OpenClaw director
 
-### Run Installer
+> Install NemoClaw **after** the wrappers — it installs its own OpenShell 0.0.44
+> CLI/gateway (port 8080) that shadows the lab 0.0.62 gateway (17670). Creating the
+> wrapper sandboxes first means the plain `openshell` CLI still targets the lab
+> gateway during their creation.
 
-```bash
-curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash
-```
-
-**Interactive prompts:**
-
-1. **Install location:** Press Enter (default: `~/.nemoclaw`)
-2. **Add to PATH?** `y`
-3. **Inference provider:** Select `OpenAI-compatible`
-4. **API key:** Paste the LITELLM_MASTER_KEY (from `.secrets/litellm.env`)
-5. **Base URL:** `http://localhost:4000/v1`
-6. **Model:** `claude-sonnet-4-6`
-
-**Expected output:**
-```
-✓ NemoClaw installed successfully
-✓ OpenClaw director container created
-```
-
-### Verify Installation
+Two scripts encode the whole flow (both called by `deploy-ec2.sh`):
 
 ```bash
-# Check NemoClaw CLI
-nemoclaw --version
+# 1. Install NemoClaw + onboard the director, non-interactively, against LiteLLM:
+bootstrap/setup-nemoclaw.sh            # --name my-assistant --model claude-code-wrapper-local
 
-# Check director container
-docker ps --filter 'name=openshell-director'
-# Should show one container running
+# 2. Expose it at openclaw.lab.lan through Traefik:
+bootstrap/setup-openclaw-relay.sh      # --name my-assistant
 ```
 
-### Restore Lab Gateway Config
+### What `setup-nemoclaw.sh` handles (and why)
 
-NemoClaw installs its own OpenShell 0.0.44. Restore the lab gateway (0.0.62) as default:
+- **`binutils` (`strings`) is required** by the installer's credential-rewrite check
+  — it installs it if missing.
+- **Non-interactive onboard against an OpenAI-compatible endpoint uses
+  `NEMOCLAW_PROVIDER=custom`** — *not* `openai`, which hardcodes `api.openai.com` and
+  returns 401. The mapping is non-obvious:
+  | Setting | Env var |
+  |---|---|
+  | provider | `NEMOCLAW_PROVIDER=custom` |
+  | API key | `COMPATIBLE_API_KEY=<LITELLM_MASTER_KEY>` |
+  | endpoint | `NEMOCLAW_ENDPOINT_URL=http://localhost:4000/v1` (not `NEMOCLAW_INFERENCE_BASE_URL`) |
+  | model | `NEMOCLAW_MODEL=claude-code-wrapper-local` |
+- **The onboard sandbox is named `my-assistant`** (CLI: `nemoclaw my-assistant ...`),
+  not `director`. The old repo probe (`nemoclaw-director-probe.sh`) assumed a
+  `director`-named sandbox and is **not used** in this flow.
+- **onboard clobbers `openshell/gateway.env`** (via the `~/.config/openshell/gateway.env`
+  symlink) with NemoClaw's 8080 config. The script **restores** the simple lab version
+  afterward (`OPENSHELL_DRIVERS=docker` + `OPENSHELL_BIND_ADDRESS=0.0.0.0`) — otherwise
+  the lab gateway comes up wrong on the next reboot. `recover` does *not* re-clobber it.
+
+### What `setup-openclaw-relay.sh` handles (the 502 fix)
+
+NemoClaw 0.0.55 serves the dashboard via an **SSH tunnel on host `127.0.0.1:18789`**,
+*not* on the sandbox container's network. So Traefik → `openclaw-director:18789`
+returns **502**. The script bridges it with a **socat relay** on the ai-net gateway IP
+(`172.19.0.1:18790 → 127.0.0.1:18789`, a persistent `openclaw-socat-relay.service`),
+repoints the Traefik file route at the relay, CORS-patches `openclaw.json`
+(`allowedOrigins += https://openclaw.lab.lan`), adds the wrapper models to the picker,
+and `nemoclaw <name> recover`s to reload.
+
+### Verify
 
 ```bash
-ln -sfn ~/home-lab/openshell/gateway.env ~/.config/openshell/gateway.env
+curl -s  -o /dev/null -w "%{http_code}\n" http://127.0.0.1:18789/          # 200 (direct)
+curl -sk -o /dev/null -w "%{http_code}\n" -H 'Host: openclaw.lab.lan' https://localhost/   # 200 (Traefik)
 ```
 
-**Use explicit paths for lab gateway commands:**
-```bash
-/usr/bin/openshell --gateway-endpoint http://127.0.0.1:17670 --gateway-insecure sandbox list
-```
+### Lab gateway commands after NemoClaw
 
-### Start Probe Service
-
-```bash
-systemctl --user enable --now nemoclaw-director-control-ui
-systemctl --user status nemoclaw-director-control-ui
-```
-
-**Expected:** `active (exited)` — This is normal. Probe runs once on boot.
-
-**What it does:**
-1. Patches OpenClaw `openclaw.json` (CORS, provider rename, model adds)
-2. Connects director to `ai-net`
-3. Starts OpenClaw gateway inside sandbox
-
-### Verify OpenClaw
-
-```bash
-# Check if OpenClaw is reachable
-curl -sk http://localhost:18789/ -o /dev/null -w "%{http_code}\n"
-# Expected: 200
-```
-
-**Note:** Uses HTTP locally. Traefik handles HTTPS termination for external access.
+`nemoclaw` installs its 0.0.44 CLI at `~/.local/bin/openshell` (shadowing the 0.0.62
+at `/usr/bin/openshell`) and flips the active gateway to `nemoclaw`. The wrapper
+sandboxes keep running as containers (`restart: unless-stopped`); the wrapper *setup*
+scripts use `docker` directly and don't need the CLI. If you do need the lab gateway
+CLI, use the explicit binary + endpoint form documented in
+[bootstrap/TROUBLESHOOTING.md](../../bootstrap/TROUBLESHOOTING.md).
 
 ---
 
@@ -556,6 +583,12 @@ docker exec "$_SB" ss -tlnp | grep ':8001'
 ---
 
 ## Configure DNS
+
+> **For this deployment we use a Route53 private hosted zone** (`*.lab.lan →
+> instance private IP`), which keeps the existing mkcert `*.lab.lan` cert valid and
+> matches the VPN-only access model. Full plan + CloudFormation template:
+> **[route53-dns.md](route53-dns.md)** / [`cloudformation/route53-lab-dns.yaml`](../../cloudformation/route53-lab-dns.yaml).
+> The Cloudflare/public-Route53 options below remain for public-exposure scenarios.
 
 ### Option A: Cloudflare Tunnel (Recommended)
 
@@ -815,9 +848,18 @@ docker exec "$_DIR" grep -o '"token":"[^"]*"' /sandbox/.openclaw/openclaw.json |
 
 ## Post-Deployment
 
-### Set Up Automatic Credential Refresh
+### Reboot autostart + credential refresh (scripted)
 
-Create systemd timers for OAuth credential syncs:
+`deploy-ec2.sh` runs [`bootstrap/install-autostart-services.sh`](../../bootstrap/install-autostart-services.sh),
+which installs the reboot-recovery units (director recover + both wrappers) **and**
+the daily OAuth credential-sync timers, then enables linger. Prefer that over the
+manual snippets here. What survives a reboot vs the gaps it closes is documented in
+**[reboot-autostart.md](reboot-autostart.md)**.
+
+### Manual credential-refresh timers (reference)
+
+> The installer script above already does this. These snippets are the manual
+> equivalent (adjust the `/home/admin` paths to your user, e.g. `/home/debian`).
 
 ```bash
 # Claude credentials (daily refresh)
@@ -930,6 +972,50 @@ Configure to send logs to CloudWatch (requires IAM role with CloudWatchAgentServ
    sudo ufw allow 443/tcp
    sudo ufw enable
    ```
+
+---
+
+## Lessons learned (2026-06 EC2 bring-up)
+
+Concrete gotchas from the first real EC2 deploy — all now handled by the scripts,
+listed here so the *why* is recorded.
+
+1. **Docker group / systemd --user manager.** After `setup-host.sh` adds the user
+   to `docker`, the `systemd --user` manager still has the old groups, so
+   `openshell-gateway` crash-loops "failed to query Docker daemon". Fix: restart the
+   user manager (`sudo systemctl restart user@$(id -u).service`) — now done by
+   `setup-host.sh`. Your interactive shell also lacks the group until re-login; the
+   scripts use `sg docker`/re-exec to cope.
+
+2. **mkcert keyless committed certs.** A fresh clone ships `rootCA.pem` /
+   `_wildcard.lab.lan.pem` but not their gitignored keys, so mkcert can't sign and
+   `setup-host.sh` aborted under `set -e`. Fix: drop the keyless cert+CA and
+   regenerate a fresh local CA — now handled in `setup-host.sh`.
+
+3. **Bedrock needs IMDS hop-limit 2 + the endpoint SG open.** See
+   [provisioning §Bedrock](aws-ec2-provisioning.md#bedrock-via-the-instance-role-recommended--no-static-keys).
+   Symptom was `InvokeModel` hanging while `sts`/`bedrock` control-plane worked.
+
+4. **Wrapper `requirements.txt` was wrong.** `claude-code-openai-wrapper` pinned a
+   nonexistent `claude-agent-sdk>=0.4.0` and omitted `python-dotenv`, `httpx`,
+   `slowapi`. Fixed in the repo.
+
+5. **NemoClaw non-interactive onboard** needs `binutils`, `NEMOCLAW_PROVIDER=custom`
+   (+ `COMPATIBLE_API_KEY`, `NEMOCLAW_ENDPOINT_URL`), names the sandbox
+   `my-assistant`, and clobbers `openshell/gateway.env` — all handled by
+   `setup-nemoclaw.sh`. See the [NemoClaw section](#install-nemoclaw--openclaw-director).
+
+6. **openclaw.lab.lan 502** — the dashboard is an SSH tunnel on host loopback, not
+   on the container network. Fixed by `setup-openclaw-relay.sh` (socat relay).
+
+7. **Traefik Docker-provider 404s** — Traefik v3.3 sends Docker API 1.24 (daemon
+   min 1.40), so label-discovered routes (`portainer/litellm/registry.lab.lan`) 404.
+   Only static file routes (`openclaw`, dashboard) work. Services are reachable
+   directly. Open item: bump the Traefik image or add a socket-proxy / static routes.
+
+8. **Reboot persistence** — containers return but the `docker exec`-launched wrapper
+   uvicorns and the director tunnel don't. Closed by `install-autostart-services.sh`;
+   details in [reboot-autostart.md](reboot-autostart.md).
 
 ---
 

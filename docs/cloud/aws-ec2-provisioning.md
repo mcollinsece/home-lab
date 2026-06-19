@@ -440,6 +440,61 @@ aws iam add-role-to-instance-profile \
 
 Attach when launching instance (see Provisioning Commands).
 
+### Bedrock via the instance role (recommended — no static keys)
+
+LiteLLM can call Bedrock using the EC2 instance role via IMDS, so no AWS access
+keys ever touch the box. Add Bedrock invoke permissions to the role:
+
+```bash
+cat > bedrock-invoke.json << 'EOF'
+{ "Version": "2012-10-17", "Statement": [
+  { "Effect": "Allow",
+    "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+    "Resource": "*" } ] }
+EOF
+aws iam put-role-policy --role-name homelab-ec2-role \
+  --policy-name bedrock-invoke --policy-document file://bedrock-invoke.json
+```
+
+Then run `init-secrets.sh --instance-role` (or `deploy-ec2.sh`, which does this by
+default): it writes a **region-only** `.secrets/bedrock.env` and LiteLLM picks up
+role credentials from IMDS.
+
+> **Two hard requirements** for the *container* to use Bedrock — both cost real
+> debugging time on the first deploy:
+
+#### 1. IMDS hop limit must be ≥ 2
+
+The LiteLLM container reaches IMDS through the Docker bridge, which adds a network
+hop. The default `HttpPutResponseHopLimit=1` lets a *host* GET succeed but **drops
+the IMDSv2 token PUT response to containers**, so boto3 can't get role creds.
+Symptom: a container GET to `169.254.169.254/latest/meta-data/` returns `401` fast,
+but the IMDSv2 token PUT returns empty. Fix at launch or after:
+
+```bash
+# At launch: --metadata-options "HttpEndpoint=enabled,HttpTokens=required,HttpPutResponseHopLimit=2"
+aws ec2 modify-instance-metadata-options \
+  --instance-id <id> --http-put-response-hop-limit 2 --http-tokens required
+```
+
+#### 2. bedrock-runtime VPC endpoint security group must allow 443
+
+If the VPC uses a **PrivateLink interface endpoint** for `bedrock-runtime`
+(its name resolves to private `10.x` IPs), that endpoint's **own** security group
+must allow inbound **TCP 443 from the instance** (source = the instance's SG, or
+the subnet/VPC CIDR). Symptom: control-plane calls (`sts`, `bedrock`) work, but
+`bedrock-runtime` TCP 443 **hangs / never connects** and `InvokeModel` times out.
+Editing the *instance* SG does nothing — it's the *endpoint* SG that gates this.
+
+```bash
+# verify from the instance once fixed (instant connect = good):
+curl -s -o /dev/null -w '%{time_connect}s %{http_code}\n' \
+  https://bedrock-runtime.us-east-1.amazonaws.com/   # 404 fast = reachable
+```
+
+If you'd rather not use the instance role, run `init-secrets.sh` (no flag) and
+provide a scoped IAM user's keys instead.
+
 ---
 
 ## DNS Strategy

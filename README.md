@@ -140,6 +140,15 @@ Cert expires **2028-09-13**; CA valid until **2036-06-13**.
 | [docs/current/todos.md](docs/current/todos.md) | Active work items and roadmap punchlist |
 | [docs/current/litellm-proxy.md](docs/current/litellm-proxy.md) | LiteLLM architecture, model routing, operations |
 
+**Cloud (AWS EC2)**
+
+| Doc | What it covers |
+|---|---|
+| [docs/cloud/aws-ec2-provisioning.md](docs/cloud/aws-ec2-provisioning.md) | Provision the instance — AMI, networking, IAM role, Bedrock (IMDS hop limit + endpoint SG) |
+| [docs/cloud/aws-ec2-deployment.md](docs/cloud/aws-ec2-deployment.md) | Deploy the stack — `bootstrap/deploy-ec2.sh` (automated) + manual walkthrough + lessons learned |
+| [docs/cloud/route53-dns.md](docs/cloud/route53-dns.md) | DNS via a Route53 private zone (`*.lab.lan`); CFT in `cloudformation/` |
+| [docs/cloud/reboot-autostart.md](docs/cloud/reboot-autostart.md) | What survives a reboot and the autostart units that close the gaps |
+
 **Future plans**
 
 | Doc | What it covers |

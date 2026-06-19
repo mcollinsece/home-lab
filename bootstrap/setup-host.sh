@@ -64,8 +64,10 @@ else
 fi
 
 # Add user to docker group (no-op if already a member).
+DOCKER_GROUP_ADDED=false
 if ! groups | grep -q '\bdocker\b'; then
   sudo usermod -aG docker "$USER"
+  DOCKER_GROUP_ADDED=true
   echo "Added $USER to docker group. A re-login is required for group membership"
   echo "to take effect in interactive shells. This script uses 'sudo docker' for now."
 fi
@@ -83,6 +85,16 @@ say "Linger for $USER"
 loginctl show-user "$USER" 2>/dev/null | grep -q 'Linger=yes' \
   || sudo loginctl enable-linger "$USER"
 echo "linger enabled"
+
+# The systemd --user manager caches supplementary groups from login time, so a
+# freshly-added 'docker' group is invisible to user services (the openshell-gateway
+# service then crash-loops "failed to query Docker daemon"). Restart the user manager
+# once so it picks up the docker group without requiring a full re-login.
+if [ "$DOCKER_GROUP_ADDED" = true ]; then
+  say "Refreshing systemd --user manager for docker group membership"
+  sudo systemctl restart "user@$(id -u "$USER").service" || true
+  sleep 3
+fi
 
 # ---- 5. Docker daemon: insecure registry config ------------------------------
 say "Docker daemon: insecure registry (registry.lab.lan:5000)"
@@ -168,6 +180,12 @@ fi
 
 say "*.lab.lan wildcard cert"
 mkdir -p "$CA_DIR" "$CERT_DIR"
+# A fresh clone ships the committed public certs (rootCA.pem, _wildcard.lab.lan.pem)
+# but NOT their gitignored private keys. mkcert cannot sign a leaf without the CA key,
+# so if the CA key is absent, drop the keyless cert+CA and regenerate a fresh local CA.
+if [ ! -f "${CA_DIR}/rootCA-key.pem" ]; then
+  rm -f "${CA_DIR}/rootCA.pem" "${CERT_DIR}/_wildcard.lab.lan.pem"
+fi
 if [ ! -f "${CERT_DIR}/_wildcard.lab.lan-key.pem" ]; then
   CAROOT="$CA_DIR" "$MKCERT_BIN" -install
   CAROOT="$CA_DIR" "$MKCERT_BIN" \
